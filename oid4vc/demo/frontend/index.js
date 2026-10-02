@@ -641,19 +641,24 @@ async function issue_sdjwt_credential(req, res) {
   }
 }
 
+// The issuer's public URL (https://<issuer ngrok>/tenant/<wallet id>), read from
+// its own metadata (ISSUER_PUBLIC_URL is the issuer's public OID4VCI port in compose).
+async function getCredentialIssuerUrl() {
+  const issuerPublicUrl = process.env.ISSUER_PUBLIC_URL || "http://issuer:8082";
+  const metadataUrl = `${issuerPublicUrl}/.well-known/openid-credential-issuer/tenant/${WALLET_ID}`;
+  return (await (await fetch(metadataUrl)).json()).credential_issuer;
+}
+
 // SD-JWT VC "IDCardX5c": same as IDCard but signed with an X.509 chain in the
 // JWS x5c header instead of kid. sdjwt-x5c/mint-issuer-cert.sh issues a leaf
 // over the did:jwk public key from the demo CA; the private key stays in the
 // wallet. The chain goes in the supported credential's x5c_cert_chain; the
 // plugin then puts it in the x5c header and sets iss to the credential issuer
-// URL, so the leaf's SAN URI is the credential_issuer from the issuer's own
-// metadata (ISSUER_PUBLIC_URL is the issuer's public OID4VCI port in compose).
+// URL, so the leaf's SAN URI is the credential_issuer.
 async function createSdJwtX5cSupportedCred(baseBody, headers, emit) {
   const x5cDir = process.env.SDJWT_X5C_DIR || "/app/sdjwt-x5c";
-  const issuerPublicUrl = process.env.ISSUER_PUBLIC_URL || "http://issuer:8082";
-  const metadataUrl = `${issuerPublicUrl}/.well-known/openid-credential-issuer/tenant/${WALLET_ID}`;
-  const issuerUrl = (await (await fetch(metadataUrl)).json()).credential_issuer;
-  emit(`x5c: credential issuer from ${metadataUrl}: ${issuerUrl}`);
+  const issuerUrl = await getCredentialIssuerUrl();
+  emit(`x5c: credential issuer: ${issuerUrl}`);
   const jwk = JSON.parse(Buffer.from(issuerDID.slice("did:jwk:".length), "base64url").toString("utf-8"));
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "sdjwt-x5c-"));
   let chainPem;
@@ -1552,11 +1557,96 @@ async function initializeSdJwtX5cTrustAnchor() {
   }
 }
 
+// Register an X.509 verifier identity so OID4VP requests are signed with an
+// x5c chain (client_id x509_san_dns:<issuer host>) instead of a bare did:jwk.
+// Wallets that only accept x5c-signed requests (e.g. Multipaz) otherwise treat
+// the request as unsigned and put "web-origin:..." in the KB-JWT aud, which
+// fails the verifier's audience check.
+//
+// The stable demo Reader Root CA (reader-ca/) can be imported into the wallet.
+// The leaf is minted on every startup because its dNSName SAN must match the
+// current ngrok host (the response_uri host). It is issued over the signing
+// DID's public key (openssl -force_pubkey), so the private key stays in ACA-Py.
+// Leaf profile follows ISO 18013-5 Annex B reader auth: digitalSignature + EKU
+// 1.0.18013.5.1.6.
+async function initializeVerifierX509Identity() {
+  const readerCaDir = process.env.READER_CA_DIR || "/app/reader-ca";
+  const rootCertPath = path.join(readerCaDir, "reader_root.pem");
+  const rootKeyPath = path.join(readerCaDir, "reader_root.key");
+
+  try {
+    if (!issuerDID || !issuerDID.startsWith("did:jwk:")) {
+      logger.warn("Verifier X.509 identity skipped: no did:jwk signing DID available.");
+      return;
+    }
+    if (!fs.existsSync(rootCertPath) || !fs.existsSync(rootKeyPath)) {
+      logger.warn(`Verifier X.509 identity skipped: reader root CA not found in ${readerCaDir}.`);
+      return;
+    }
+
+    const dnsName = new URL(await getCredentialIssuerUrl()).hostname;
+    const jwk = JSON.parse(Buffer.from(issuerDID.slice("did:jwk:".length), "base64url").toString("utf-8"));
+    const publicKeyPem = crypto.createPublicKey({ key: jwk, format: "jwk" })
+      .export({ type: "spki", format: "pem" });
+
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "reader-cert-"));
+    let leafPem;
+    try {
+      fs.writeFileSync(path.join(workDir, "pub.pem"), publicKeyPem);
+      // Dummy key/CSR carries the subject; -force_pubkey swaps in the DID key.
+      fs.writeFileSync(path.join(workDir, "ext.cnf"), [
+        "basicConstraints=critical,CA:FALSE",
+        "keyUsage=critical,digitalSignature",
+        "extendedKeyUsage=critical,1.0.18013.5.1.6",
+        `subjectAltName=DNS:${dnsName}`,
+        "subjectKeyIdentifier=hash",
+        "authorityKeyIdentifier=keyid:always",
+      ].join("\n") + "\n");
+      execFileSync("openssl", [
+        "req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+        "-nodes", "-keyout", path.join(workDir, "dummy.key"),
+        "-subj", `/C=CA/ST=Ontario/O=Demo mDoc Verifier/CN=${dnsName}`,
+        "-out", path.join(workDir, "leaf.csr"),
+      ], { stdio: "pipe" });
+      execFileSync("openssl", [
+        "x509", "-req", "-in", path.join(workDir, "leaf.csr"),
+        "-force_pubkey", path.join(workDir, "pub.pem"),
+        "-CA", rootCertPath, "-CAkey", rootKeyPath,
+        "-set_serial", `0x${crypto.randomBytes(8).toString("hex")}`,
+        "-sha256", "-days", "90",
+        "-extfile", path.join(workDir, "ext.cnf"),
+        "-out", path.join(workDir, "leaf.pem"),
+      ], { stdio: "pipe" });
+      leafPem = fs.readFileSync(path.join(workDir, "leaf.pem"), "utf-8");
+    } finally {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+
+    const result = await fetchApiData(`${API_BASE_URL}/oid4vp/x509-identity`, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token.token,
+      },
+      body: JSON.stringify({
+        cert_chain_pem: leafPem + fs.readFileSync(rootCertPath, "utf-8"),
+        verification_method: `${issuerDID}#0`,
+        client_id: dnsName,
+      }),
+    });
+    logger.info(`Registered verifier X.509 identity: client_id=x509_san_dns:${result.client_id}, chain length=${result.cert_chain?.length}`);
+  } catch (err) {
+    logger.error("Verifier X.509 identity initialization failed:", err?.response?.data || err.message);
+  }
+}
+
 await initializeAuthServer();
 await initializeIssuerMetadata();
 await initializeSigningDid();
 await initializeMdocSigningKey();
 await initializeSdJwtX5cTrustAnchor();
+await initializeVerifierX509Identity();
 
 
 // Credential Info route
