@@ -368,7 +368,7 @@ async function issue_sdjwt_credential(req, res) {
     method: "POST",
     headers: commonHeaders,
     body: JSON.stringify({
-      format: "vc+sd-jwt",
+      format: "dc+sd-jwt",
       id: "IDCard",
       proof_types_supported: {
         jwt: {
@@ -1050,7 +1050,7 @@ async function create_sd_jwt_presentation(req, res) {
       credentials: [
         {
           id: "IDCard",
-          format: "vc+sd-jwt",
+          format: "dc+sd-jwt",
           meta: {
             vct_values: ["ExampleIDCard"]
           },
@@ -1079,7 +1079,7 @@ async function create_sd_jwt_presentation(req, res) {
     body: JSON.stringify({
       dcql_query_id: dcqlQueryId,
       vp_formats: {
-        "vc+sd-jwt": {
+        "dc+sd-jwt": {
             "sd-jwt_alg_values": [
                 "ES256",
                 "ES384"
