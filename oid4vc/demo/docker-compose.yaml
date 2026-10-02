@@ -127,6 +127,7 @@ services:
     volumes:
       - ./frontend/index.js:/app/index.js:z
       - ./frontend/templates:/app/templates:z
+      - ./sdjwt-x5c:/app/sdjwt-x5c:ro,z
     environment:
       NODE_ENV: development # Set NODE_ENV to 'development'
       WDS_SOCKET_PORT: 0

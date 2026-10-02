@@ -7,6 +7,10 @@ import {default as NodeCache } from "node-cache";
 import QRCode from "qrcode-svg";
 
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 
 import pino from "pino";
 import colada from "pino-colada";
@@ -91,6 +95,7 @@ let sdJwtSupportedCredID = "";
 let mdocSupportedCredID = "";
 let jwtStatusListID = "";
 let sdJwtStatusListID = "";
+let sdJwtX5c = null;
 
 
 //    ###     ######     ###            ########  ##    ##
@@ -531,10 +536,19 @@ async function issue_sdjwt_credential(req, res) {
   const isRefresh = req.body['is-refresh'] === 'on';
   const refreshId = req.body['refresh-id'];
 
+  // Optional: sign with an X.509 chain in the JWS x5c header (see demo/sdjwt-x5c/).
+  // `did` only sets `iss` when a verification_method is given; the key is still the did:jwk.
+  const useX5c = req.body['use-x5c'] === 'on';
+  if (useX5c && !sdJwtX5c) {
+    sdJwtX5c = await createSdJwtX5cSupportedCred(
+      JSON.parse(createCredentialSupportedOptions.body), commonHeaders,
+      (message) => events.emit(`issuance-${req.body.registrationId}`, {type: "message", message}));
+  }
+
   const exchangeCreateOptions = {
-    did: issuerDID,
+    did: useX5c ? sdJwtX5c.issuerUrl : issuerDID,
     verification_method: issuerDID+"#0",
-    supported_cred_id: sdJwtSupportedCredID,
+    supported_cred_id: useX5c ? sdJwtX5c.supportedCredId : sdJwtSupportedCredID,
     credential_subject: {
       given_name: firstName,
       family_name: lastName,
@@ -607,6 +621,70 @@ async function issue_sdjwt_credential(req, res) {
   } else {
     events.emit(`issuance-${req.body.registrationId}`, {type: "message", message: "Credential Refresh API call was successful."});
   }
+  if (useX5c) {
+    events.emit(`issuance-${req.body.registrationId}`, {type: "message", message:
+      "x5c: once issued, check the signature from oid4vc/demo with: " +
+      "docker compose logs issuer | node sdjwt-x5c/verify-sdjwt-x5c.mjs"});
+  }
+}
+
+// SD-JWT VC "IDCardX5c": same as IDCard but signed with an X.509 chain in the
+// JWS x5c header instead of kid. sdjwt-x5c/mint-issuer-cert.sh issues a leaf
+// over the did:jwk public key (SAN URI = issuer URL = iss) from the demo CA;
+// the private key stays in the wallet. The plugin reads the chain from
+// vc_additional_data.x5c_cert_chain, which the SD-JWT create route can't set,
+// so the record is completed via the JWT update route (it stores
+// credential_definition as vc_additional_data, leaving format_data intact).
+// iss and the SAN URI are the credential_issuer from the issuer's own metadata
+// (ISSUER_PUBLIC_URL is the issuer's public OID4VCI port inside compose).
+async function createSdJwtX5cSupportedCred(baseBody, headers, emit) {
+  const x5cDir = process.env.SDJWT_X5C_DIR || "/app/sdjwt-x5c";
+  const issuerPublicUrl = process.env.ISSUER_PUBLIC_URL || "http://issuer:8082";
+  const metadataUrl = `${issuerPublicUrl}/.well-known/openid-credential-issuer/tenant/${WALLET_ID}`;
+  const issuerUrl = (await (await fetch(metadataUrl)).json()).credential_issuer;
+  emit(`x5c: credential issuer (iss) from ${metadataUrl}: ${issuerUrl}`);
+  const jwk = JSON.parse(Buffer.from(issuerDID.slice("did:jwk:".length), "base64url").toString("utf-8"));
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "sdjwt-x5c-"));
+  let chainPem;
+  try {
+    const pubPath = path.join(workDir, "pub.pem");
+    fs.writeFileSync(pubPath, crypto.createPublicKey({ key: jwk, format: "jwk" })
+      .export({ type: "spki", format: "pem" }));
+    chainPem = execFileSync("bash", [path.join(x5cDir, "mint-issuer-cert.sh"), pubPath, issuerUrl],
+      { encoding: "utf-8" });
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+  const certs = chainPem.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g)
+    .map((pem) => new crypto.X509Certificate(pem));
+  const x5c = certs.map((cert) => cert.raw.toString("base64"));
+  emit(`x5c: minted issuer cert "${certs[0].subject.replace(/\n/g, ", ")}" ` +
+    `(${certs[0].subjectAltName}), chain length ${x5c.length}`);
+
+  const call = async (method, url, body) => {
+    const response = await fetch(url, { method, headers, body: JSON.stringify(body) });
+    if (!response.ok) {
+      const error = `${method} ${url} failed: ${response.status} ${await response.text()}`;
+      emit(error);
+      throw new Error(error);
+    }
+    return response.json();
+  };
+  const body = {
+    ...baseBody,
+    id: "IDCardX5c",
+    credential_signing_alg_values_supported: ["ES256"],
+    credential_metadata: {
+      ...baseBody.credential_metadata,
+      display: [{ ...baseBody.credential_metadata.display[0], name: "ID Card (x5c)" }],
+    },
+  };
+  const created = await call("POST", `${API_BASE_URL}/oid4vci/credential-supported/create/sd-jwt`, body);
+  const { vct, sd_list, ...rest } = body;
+  await call("PUT", `${API_BASE_URL}/oid4vci/credential-supported/records/jwt/${created.supported_cred_id}`,
+    { ...rest, credential_definition: { vct, sd_list, x5c_cert_chain: x5c } });
+  emit(`x5c: created supported credential ${created.supported_cred_id} with vc_additional_data.x5c_cert_chain`);
+  return { supportedCredId: created.supported_cred_id, issuerUrl };
 }
 
 // Begin Issue mDL (mso_mdoc) Credential Flow
