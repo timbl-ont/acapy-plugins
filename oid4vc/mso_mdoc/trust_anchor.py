@@ -1,8 +1,9 @@
 """mso_mdoc trust anchor record.
 
 A ``TrustAnchorRecord`` persists a single PEM-encoded X.509 certificate that
-is trusted as a CA when verifying mDoc issuer signatures.  Records are scoped
-to the current wallet session, giving multi-tenant isolation automatically.
+is trusted as a CA when verifying mDoc issuer signatures (or, with purpose
+``sd_jwt_issuer``, SD-JWT VC issuer ``x5c`` chains).  Records are scoped to
+the current wallet session, giving multi-tenant isolation automatically.
 """
 
 from typing import Optional
@@ -80,11 +81,13 @@ class TrustAnchorRecordSchema(BaseRecordSchema):
     purpose = fields.Str(
         required=False,
         load_default="iaca",
-        validate=validate.OneOf(["iaca", "reader_auth"]),
+        validate=validate.OneOf(["iaca", "reader_auth", "sd_jwt_issuer"]),
         metadata={
             "description": (
                 "Trust anchor purpose: 'iaca' for issuer CA certificates, "
-                "'reader_auth' for reader authentication certificates."
+                "'reader_auth' for reader authentication certificates, "
+                "'sd_jwt_issuer' for CAs trusted to sign SD-JWT VC issuer "
+                "x5c chains (doctype is ignored)."
             ),
             "example": "iaca",
         },

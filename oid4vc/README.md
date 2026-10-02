@@ -423,6 +423,8 @@ When the Controller sets up a Supported Credential record using the Admin API, t
 - are rejected at issuance unless the leaf certificate holds the exchange's signing key (`verification_method`);
 - use the Credential Issuer Identifier (`<endpoint>/tenant/<wallet id>`, or `<endpoint>` without multitenancy) as `iss` instead of the DID. Exchanges are still created with the signing DID. Put this URL in the leaf's SAN `URI` for verifiers that match `iss` against the certificate.
 
+When verifying (presentations and `verify_credential`), an SD-JWT VC whose header carries `x5c` must chain to a trust anchor registered with `POST /mso-mdoc/trust-anchors` using `"purpose": "sd_jwt_issuer"` (this needs the `mso_mdoc` plugin). The chain may end at the anchor or just below it; further certificates in the anchor's PEM are used as intermediates. Every certificate on the path must be within its validity period, issuers must be CAs within their path length, and the leaf must allow `digitalSignature`. Revocation is not checked. Credentials signed with `kid` are unaffected.
+
 See [the demo](demo/README.md) for an example that mints a certificate over a did:jwk key.
 
 ## Contributing

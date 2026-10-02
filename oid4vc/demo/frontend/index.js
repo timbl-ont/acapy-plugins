@@ -1564,10 +1564,34 @@ async function initializeMdocSigningKey() {
   }
 }
 
+// Trust the demo SD-JWT issuer CA so x5c-signed SD-JWT VCs verify on presentation.
+async function initializeSdJwtX5cTrustAnchor() {
+  const caPath = path.join(process.env.SDJWT_X5C_DIR || "/app/sdjwt-x5c", "issuer_ca.pem");
+  try {
+    const trustAnchorData = await fetchApiData(`${API_BASE_URL}/mso-mdoc/trust-anchors`, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token.token,
+      },
+      body: JSON.stringify({
+        certificate_pem: fs.readFileSync(caPath, "utf-8"),
+        purpose: "sd_jwt_issuer",
+        label: "Demo SD-JWT VC Issuer CA",
+      }),
+    });
+    logger.info(`Registered SD-JWT issuer trust anchor:`, trustAnchorData);
+  } catch (err) {
+    logger.error("SD-JWT issuer trust anchor registration failed:", err.message);
+  }
+}
+
 await initializeAuthServer();
 await initializeIssuerMetadata();
 await initializeSigningDid();
 await initializeMdocSigningKey();
+await initializeSdJwtX5cTrustAnchor();
 
 
 // Credential Info route

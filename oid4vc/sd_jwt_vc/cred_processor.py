@@ -8,6 +8,7 @@ import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
 from acapy_agent.admin.request_context import AdminRequestContext
@@ -37,6 +38,11 @@ from oid4vc.pop_result import PopResult
 from oid4vc.status_handler import StatusHandler
 
 LOGGER = logging.getLogger(__name__)
+
+# mso_mdoc TrustAnchorRecord purpose for CAs trusted to issue SD-JWT VC x5c chains
+SD_JWT_ISSUER_TRUST_PURPOSE = "sd_jwt_issuer"
+X5C_MAX_PATH_LENGTH = 10
+
 # Certain claims, if present, are never to be included in the selective disclosures list.
 
 # For flat claims, it's a simple matter of preventing the basic JSON pointer:
@@ -55,11 +61,12 @@ class SDJWTError(BaseException):
     """SD-JWT Error."""
 
 
-def validate_x5c_cert_chain(x5c: Any):
+def validate_x5c_cert_chain(x5c: Any) -> List[x509.Certificate]:
     """Validate an x5c chain: std base64 DER certificates, leaf first.
 
     Each certificate must be signed by the next one and the leaf must hold a
-    key type supported for signing. Raises ValueError otherwise.
+    key type supported for signing. Returns the parsed certificates; raises
+    ValueError otherwise.
     """
     if not (isinstance(x5c, list) and x5c and all(isinstance(cert, str) for cert in x5c)):
         raise ValueError(
@@ -81,6 +88,116 @@ def validate_x5c_cert_chain(x5c: Any):
                 "issued by the next"
             ) from err
     key_from_x5c(x5c)
+    return certs
+
+
+def _issued_by(cert: x509.Certificate, issuer: x509.Certificate) -> bool:
+    try:
+        cert.verify_directly_issued_by(issuer)
+        return True
+    except (InvalidSignature, TypeError, ValueError):
+        return False
+
+
+def _extension(cert: x509.Certificate, ext_type):
+    try:
+        return cert.extensions.get_extension_for_class(ext_type).value
+    except x509.ExtensionNotFound:
+        return None
+
+
+def verify_x5c_trust(
+    x5c: Any, trust_anchor_pems: List[str], now: Optional[datetime] = None
+):
+    """Check that an x5c chain leads to a trust anchor.
+
+    The first certificate of each trust anchor PEM is trusted; any further
+    certificates in it are intermediates that may complete the chain. Every
+    certificate on the path must be within its validity period, issuers must
+    be CAs (respecting pathLenConstraint and keyCertSign) and the leaf must
+    allow digitalSignature. Raises ValueError otherwise.
+    """
+    chain = validate_x5c_cert_chain(x5c)
+    anchors: List[x509.Certificate] = []
+    intermediates: List[x509.Certificate] = []
+    for pem in trust_anchor_pems:
+        try:
+            certs = x509.load_pem_x509_certificates(pem.encode())
+        except ValueError:
+            LOGGER.warning("Skipping unparseable SD-JWT issuer trust anchor")
+            continue
+        anchors.append(certs[0])
+        intermediates.extend(certs[1:])
+    if not anchors:
+        raise ValueError(
+            f"no '{SD_JWT_ISSUER_TRUST_PURPOSE}' trust anchors are configured"
+        )
+
+    path = [chain[0]]
+    remaining = chain[1:]
+    for _ in range(X5C_MAX_PATH_LENGTH):
+        cert = path[-1]
+        if cert in anchors:
+            break
+        anchor = next((a for a in anchors if _issued_by(cert, a)), None)
+        if anchor is not None:
+            path.append(anchor)
+            break
+        issuer = (
+            remaining.pop(0)
+            if remaining
+            else next(
+                (c for c in intermediates if c not in path and _issued_by(cert, c)),
+                None,
+            )
+        )
+        if issuer is None:
+            raise ValueError("certificate chain does not lead to a trust anchor")
+        path.append(issuer)
+    else:
+        raise ValueError("certificate chain is too long")
+
+    now = now or datetime.now(timezone.utc)
+    for cert in path:
+        if not cert.not_valid_before_utc <= now <= cert.not_valid_after_utc:
+            raise ValueError(
+                f"certificate '{cert.subject.rfc4514_string()}' is expired or "
+                "not yet valid"
+            )
+    key_usage = _extension(path[0], x509.KeyUsage)
+    if key_usage is not None and not key_usage.digital_signature:
+        raise ValueError("leaf certificate does not allow digitalSignature")
+    for depth, cert in enumerate(path[1:]):
+        constraints = _extension(cert, x509.BasicConstraints)
+        key_usage = _extension(cert, x509.KeyUsage)
+        if (
+            constraints is None
+            or not constraints.ca
+            or (constraints.path_length is not None and depth > constraints.path_length)
+            or (key_usage is not None and not key_usage.key_cert_sign)
+        ):
+            raise ValueError(
+                f"certificate '{cert.subject.rfc4514_string()}' is not a valid "
+                "issuing CA for this chain"
+            )
+
+
+async def sd_jwt_issuer_trust_anchors(profile: Profile) -> List[str]:
+    """Return the PEMs of the profile's SD-JWT VC issuer trust anchors.
+
+    These are mso_mdoc TrustAnchorRecords with purpose 'sd_jwt_issuer',
+    managed through /mso-mdoc/trust-anchors.
+    """
+    try:
+        from mso_mdoc.trust_anchor import TrustAnchorRecord  # noqa: PLC0415
+    except ImportError:
+        LOGGER.warning("mso_mdoc is unavailable, so no SD-JWT issuer trust anchors")
+        return []
+    async with profile.session() as session:
+        records = await TrustAnchorRecord.query(
+            session, tag_filter={"purpose": SD_JWT_ISSUER_TRUST_PURPOSE}
+        )
+    return [record.certificate_pem for record in records if record.certificate_pem]
 
 
 async def _check_x5c_signing_key(
@@ -526,6 +643,15 @@ class SDJWTVerifierACAPy(SDJWTVerifier):
         if verified.verified is False:
             raise CredProcessorError("Invalid signature")
 
+        if "x5c" in verified.headers:
+            try:
+                verify_x5c_trust(
+                    verified.headers["x5c"],
+                    await sd_jwt_issuer_trust_anchors(self.profile),
+                )
+            except ValueError as err:
+                raise CredProcessorError(f"Untrusted issuer x5c chain: {err}") from err
+
         self._sd_jwt_payload = verified.payload
         self._holder_public_key_payload = self._sd_jwt_payload.get("cnf", None)
 
@@ -597,5 +723,6 @@ async def sd_jwt_verify(
     try:
         payload = (await sd_jwt_verifier.verify()).get_verified_payload()
         return VerifyResult(True, payload)
-    except Exception:
+    except Exception as err:
+        LOGGER.warning("SD-JWT verification failed: %s", err)
         return VerifyResult(False, None)

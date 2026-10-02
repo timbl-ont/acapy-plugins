@@ -28,7 +28,13 @@ from oid4vc.jwt import key_from_x5c
 from oid4vc.models.exchange import OID4VCIExchangeRecord
 from oid4vc.models.supported_cred import SupportedCredential
 from oid4vc.pop_result import PopResult
-from sd_jwt_vc.cred_processor import SdJwtCredIssueProcessor, validate_x5c_cert_chain
+from mso_mdoc.trust_anchor import TrustAnchorRecord, TrustAnchorRecordSchema
+from sd_jwt_vc.cred_processor import (
+    SdJwtCredIssueProcessor,
+    sd_jwt_verify,
+    validate_x5c_cert_chain,
+    verify_x5c_trust,
+)
 from sd_jwt_vc.routes import (
     supported_credential_create,
     update_supported_credential_sd_jwt,
@@ -43,7 +49,10 @@ def _name(cn: str) -> x509.Name:
     return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
 
 
-def _cert(subject, issuer, public_key, signing_key, san=None) -> x509.Certificate:
+def _cert(
+    subject, issuer, public_key, signing_key, san=None, ca=None, path_length=None
+) -> x509.Certificate:
+    """Build a cert; ca=True/False adds CA/end-entity constraints and key usage."""
     now = datetime.datetime.now(datetime.timezone.utc)
     builder = (
         x509.CertificateBuilder()
@@ -59,7 +68,31 @@ def _cert(subject, issuer, public_key, signing_key, san=None) -> x509.Certificat
             x509.SubjectAlternativeName([x509.UniformResourceIdentifier(san)]),
             critical=False,
         )
+    if ca is not None:
+        builder = builder.add_extension(
+            x509.BasicConstraints(ca=ca, path_length=path_length if ca else None),
+            critical=True,
+        ).add_extension(
+            x509.KeyUsage(
+                digital_signature=not ca,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=ca,
+                crl_sign=ca,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
     return builder.sign(signing_key, hashes.SHA256())
+
+
+def _pem(*certs: x509.Certificate) -> str:
+    return "".join(
+        cert.public_bytes(serialization.Encoding.PEM).decode() for cert in certs
+    )
 
 
 def _x5c(*certs: x509.Certificate) -> list:
@@ -78,11 +111,32 @@ def _askar_public_key(key: Key) -> ec.EllipticCurvePublicKey:
     ).public_key()
 
 
-def _chain_for(public_key: ec.EllipticCurvePublicKey) -> list:
-    ca_key = ec.generate_private_key(ec.SECP256R1())
-    ca = _cert("Test CA", "Test CA", ca_key.public_key(), ca_key)
-    leaf = _cert("Test Issuer", "Test CA", public_key, ca_key, san=ISSUER_URL)
-    return _x5c(leaf, ca)
+def _ca(name="Test CA", issuer=None, path_length=None):
+    """Return (cert, key) for a CA, self-signed unless issuer=(cert, key)."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    issuer_cert, issuer_key = issuer or (None, key)
+    issuer_name = issuer_cert.subject.rfc4514_string()[3:] if issuer_cert else name
+    cert = _cert(
+        name, issuer_name, key.public_key(), issuer_key, ca=True, path_length=path_length
+    )
+    return cert, key
+
+
+def _leaf(public_key, issuer, **kwargs) -> x509.Certificate:
+    issuer_cert, issuer_key = issuer
+    return _cert(
+        "Test Issuer",
+        issuer_cert.subject.rfc4514_string()[3:],
+        public_key,
+        issuer_key,
+        san=ISSUER_URL,
+        **{"ca": False, **kwargs},
+    )
+
+
+def _chain_for(public_key: ec.EllipticCurvePublicKey, ca=None) -> list:
+    ca = ca or _ca()
+    return _x5c(_leaf(public_key, ca), ca[0])
 
 
 @pytest.fixture
@@ -228,6 +282,82 @@ async def test_issue_without_x5c_uses_did(context, issuer_key):
     assert b64_to_dict(header_b64)["kid"] == did + "#0"
     assert "x5c" not in b64_to_dict(header_b64)
     assert b64_to_dict(payload_b64)["iss"] == did
+
+
+def test_verify_x5c_trust():
+    public_key = ec.generate_private_key(ec.SECP256R1()).public_key()
+    root = _ca("Root")
+    leaf = _leaf(public_key, root)
+
+    verify_x5c_trust(_x5c(leaf, root[0]), [_pem(root[0])])
+    verify_x5c_trust(_x5c(leaf), [_pem(root[0])])
+    verify_x5c_trust(_x5c(leaf), [_pem(leaf)])
+
+    # Intermediate taken from the x5c, or from the trust anchor PEM.
+    inter = _ca("Intermediate", issuer=root)
+    inter_leaf = _leaf(public_key, inter)
+    verify_x5c_trust(_x5c(inter_leaf, inter[0]), [_pem(root[0])])
+    verify_x5c_trust(_x5c(inter_leaf), [_pem(root[0], inter[0])])
+
+    with pytest.raises(ValueError, match="no 'sd_jwt_issuer' trust anchors"):
+        verify_x5c_trust(_x5c(leaf, root[0]), [])
+    with pytest.raises(ValueError, match="does not lead to a trust anchor"):
+        verify_x5c_trust(_x5c(leaf, root[0]), [_pem(_ca("Root")[0])])
+    with pytest.raises(ValueError, match="does not lead to a trust anchor"):
+        verify_x5c_trust(_x5c(inter_leaf), [_pem(root[0])])
+    with pytest.raises(ValueError, match="expired or not yet valid"):
+        verify_x5c_trust(
+            _x5c(leaf, root[0]),
+            [_pem(root[0])],
+            now=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=2),
+        )
+
+    # Issuers must be CAs within their path length; leaf must sign.
+    not_ca_key = ec.generate_private_key(ec.SECP256R1())
+    not_ca = _cert("Not CA", "Not CA", not_ca_key.public_key(), not_ca_key)
+    with pytest.raises(ValueError, match="not a valid issuing CA"):
+        verify_x5c_trust(_x5c(_leaf(public_key, (not_ca, not_ca_key))), [_pem(not_ca)])
+    short_root = _ca("Short Root", path_length=0)
+    short_inter = _ca("Short Intermediate", issuer=short_root)
+    with pytest.raises(ValueError, match="'CN=Short Root' is not a valid issuing CA"):
+        verify_x5c_trust(
+            _x5c(_leaf(public_key, short_inter), short_inter[0]), [_pem(short_root[0])]
+        )
+    with pytest.raises(ValueError, match="does not allow digitalSignature"):
+        verify_x5c_trust(_x5c(_leaf(public_key, root, ca=True)), [_pem(root[0])])
+
+
+def test_trust_anchor_schema_accepts_sd_jwt_issuer():
+    schema = TrustAnchorRecordSchema()
+    assert not schema.validate({"certificate_pem": "x", "purpose": "sd_jwt_issuer"})
+    assert schema.validate({"certificate_pem": "x", "purpose": "other"})
+
+
+@pytest.mark.asyncio
+async def test_verify_requires_sd_jwt_issuer_trust_anchor(context, issuer_key):
+    did, key = issuer_key
+    ca = _ca()
+    cred = await SdJwtCredIssueProcessor().issue(
+        {},
+        _supported(_chain_for(_askar_public_key(key), ca)),
+        _ex_record(did),
+        POP,
+        context,
+    )
+
+    assert not (await sd_jwt_verify(context.profile, cred)).verified
+
+    async with context.session() as session:
+        await TrustAnchorRecord(certificate_pem=_pem(ca[0])).save(session)
+    assert not (await sd_jwt_verify(context.profile, cred)).verified
+
+    async with context.session() as session:
+        await TrustAnchorRecord(
+            certificate_pem=_pem(ca[0]), purpose="sd_jwt_issuer"
+        ).save(session)
+    result = await sd_jwt_verify(context.profile, cred)
+    assert result.verified
+    assert result.payload["iss"] == ISSUER_URL
 
 
 class _Request:

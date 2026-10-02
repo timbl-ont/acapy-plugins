@@ -74,7 +74,9 @@ class TrustAnchorQuerySchema(OpenAPISchema):
     )
     purpose = fields.Str(
         required=False,
-        metadata={"description": "Filter by purpose: 'iaca' or 'reader_auth'"},
+        metadata={
+            "description": "Filter by purpose: 'iaca', 'reader_auth' or 'sd_jwt_issuer'"
+        },
     )
 
 

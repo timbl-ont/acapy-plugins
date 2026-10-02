@@ -44,6 +44,7 @@ Tick **Sign with X.509 certificate (x5c)** on the SD-JWT issue page to issue `ID
 * On first use, `sdjwt-x5c/mint-issuer-cert.sh` mints a 90-day leaf certificate over the issuer did:jwk P-256 public key (`openssl -force_pubkey`; the private key stays in ACA-Py). The leaf is signed by the committed demo CA `sdjwt-x5c/issuer_ca.pem`. Its SAN is `URI:` the credential issuer URL (`https://<issuer ngrok>/tenant/<wallet id>`) plus a matching `DNS` entry.
 * The chain is passed as `x5c_cert_chain` to `POST /oid4vci/credential-supported/create/sd-jwt`. The `sd_jwt_vc` plugin puts it in the `x5c` header, checks the leaf holds the exchange's signing key, and sets `iss` to the credential issuer URL (the exchange is still created with the did:jwk, which selects the signing key).
 * Import `sdjwt-x5c/issuer_ca.pem` (or `.der`) into the wallet as a trusted issuer certificate.
+* At startup the demo registers `sdjwt-x5c/issuer_ca.pem` with `POST /mso-mdoc/trust-anchors` (`purpose: sd_jwt_issuer`), so presenting `IDCardX5c` on the SD-JWT presentation page verifies. An `x5c` chain that doesn't lead to such an anchor fails verification.
 * After the wallet accepts the credential, check its signature, chain and `iss`/SAN match from the issuer log:
 
 ```
