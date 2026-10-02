@@ -336,6 +336,9 @@ async function issue_sdjwt_credential(req, res) {
 
   const { fname: firstName, lname: lastName, age: ageString } = req.body
   const age = parseInt(ageString);
+  // EUDI PID rulebook SD-JWT VC encoding: `picture` is a data URL of a base64 JPEG.
+  const portrait = (req.body.portrait || "").replace(/\s/g, "");
+  const picture = portrait.startsWith("data:") ? portrait : `data:image/jpeg;base64,${portrait}`;
 
   const headers = {
     accept: "application/json",
@@ -380,6 +383,7 @@ async function issue_sdjwt_credential(req, res) {
       sd_list: [
           "/given_name",
           "/family_name",
+          "/picture",
           "/age_is_over_12",
           "/age_is_over_14",
           "/age_is_over_16",
@@ -411,6 +415,15 @@ async function issue_sdjwt_credential(req, res) {
             "display": [
               {
                 "name": "Family Name",
+                "locale": "en-US"
+              }
+            ]
+          },
+          {
+            "path": ["picture"],
+            "display": [
+              {
+                "name": "Portrait",
                 "locale": "en-US"
               }
             ]
@@ -552,6 +565,7 @@ async function issue_sdjwt_credential(req, res) {
     credential_subject: {
       given_name: firstName,
       family_name: lastName,
+      picture,
       something_nested: {key1: {key2: {key3: "something nested"}}},
       source_document_type: "id_card",
       age_is_over_12: true,

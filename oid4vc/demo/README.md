@@ -19,6 +19,7 @@ docker compose up
 * Present Proof via OpendID4VP - JWT, SD-JWT (Not working, in development)
 * Update the status of a JWT or SD-JWT credential
 * Refresh an SD-JWT credetial
+* SD-JWT ID card portrait: a selectively disclosable `picture` claim, a `data:image/jpeg;base64,…` URL as in the EUDI PID rulebook (the form is prefilled with a sample JPEG)
 * Display credential records
 
 ### Current Status of the Demo
