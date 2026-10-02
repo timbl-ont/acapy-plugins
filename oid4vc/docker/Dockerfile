@@ -26,7 +26,8 @@ RUN poetry install --without dev --all-extras
 
 #build the isomdl library from indicio. Tempory solution until we have a wheel on pypi with linux arm support
 RUN apt-get update && apt-get install -y git build-essential && apt-get clean
-RUN git clone https://github.com/Indicio-tech/isomdl-uniffi.git
+# Pinned: later commits force a zig linker and add a status_list arg the plugin doesn't pass.
+RUN git clone https://github.com/Indicio-tech/isomdl-uniffi.git && git -C isomdl-uniffi checkout 2bce4e0
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /usr/src/app/isomdl-uniffi/python
