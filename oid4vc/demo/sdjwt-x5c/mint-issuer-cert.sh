@@ -3,12 +3,11 @@
 # the private key never leaves the wallet. The leaf is signed by the demo
 # SD-JWT issuer CA beside this script (generated on first run if missing).
 #
-# Usage: mint-issuer-cert.sh <public-key.pem> <issuer-url> [extra-san-uri...]
+# Usage: mint-issuer-cert.sh <public-key.pem> <issuer-url>
 #   Prints the chain (leaf, then CA) as PEM on stdout.
 #
-# The leaf carries SAN URI=<issuer-url>, URI=<extra-san-uri>... and
-# DNS=<issuer host>; one of the URIs should match the SD-JWT `iss` claim.
-# Set OPENSSL to override the binary (LibreSSL won't work).
+# The leaf carries SAN URI=<issuer-url> and DNS=<issuer host> so it matches the
+# SD-JWT `iss` claim. Set OPENSSL to override the binary (LibreSSL won't work).
 set -euo pipefail
 
 OPENSSL="${OPENSSL:-openssl}"
@@ -16,14 +15,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CA_KEY="$SCRIPT_DIR/issuer_ca.key"
 CA_PEM="$SCRIPT_DIR/issuer_ca.pem"
 
-if [[ $# -lt 2 ]]; then
-  echo "Usage: $0 <public-key.pem> <issuer-url> [extra-san-uri...]" >&2
+if [[ $# -ne 2 ]]; then
+  echo "Usage: $0 <public-key.pem> <issuer-url>" >&2
   exit 1
 fi
 PUB_KEY="$1"
 ISSUER_URL="$2"
-SAN="URI:${ISSUER_URL}"
-for uri in "${@:3}"; do SAN="${SAN},URI:${uri}"; done
 HOST="$(echo "$ISSUER_URL" | sed -E 's#^[a-z]+://([^/:]+).*#\1#')"
 
 if [[ ! -f "$CA_PEM" ]]; then
@@ -43,7 +40,7 @@ trap 'rm -rf "$WORK"' EXIT
 cat > "$WORK/ext.cnf" <<EOF
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature
-subjectAltName=${SAN},DNS:${HOST}
+subjectAltName=URI:${ISSUER_URL},DNS:${HOST}
 subjectKeyIdentifier=hash
 authorityKeyIdentifier=keyid:always
 EOF

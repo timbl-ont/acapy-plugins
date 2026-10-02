@@ -415,6 +415,16 @@ When the Controller sets up a Supported Credential record using the Admin API, t
 }
 ```
 
+#### SD-JWT VC issuer certificates (x5c)
+
+`POST /oid4vci/credential-supported/create/sd-jwt` (and the matching `PUT .../records/sd-jwt/{id}`) accepts an optional `x5c_cert_chain`: the issuer's X.509 chain as standard base64 DER strings, leaf first. It is validated (each certificate issued by the next; leaf key P-256 or Ed25519) and stored in `vc_additional_data`, so it is not reported in the issuer metadata. Credentials issued from that configuration then:
+
+- carry the chain in the JWS `x5c` header instead of `kid`;
+- are rejected at issuance unless the leaf certificate holds the exchange's signing key (`verification_method`);
+- use the Credential Issuer Identifier (`<endpoint>/tenant/<wallet id>`, or `<endpoint>` without multitenancy) as `iss` instead of the DID. Exchanges are still created with the signing DID. Put this URL in the leaf's SAN `URI` for verifiers that match `iss` against the certificate.
+
+See [the demo](demo/README.md) for an example that mints a certificate over a did:jwk key.
+
 ## Contributing
 
 This project is managed using Poetry. To get started:

@@ -120,6 +120,20 @@ class SdJwtSupportedCredCreateReq(OpenAPISchema):
             ],
         },
     )
+    x5c_cert_chain = fields.List(
+        fields.Str,
+        required=False,
+        metadata={
+            "description": (
+                "Issuer X.509 certificate chain (standard base64 DER, leaf "
+                "first, as in the JOSE x5c header). The leaf must hold the "
+                "exchange's signing key. When set, credentials carry this "
+                "chain in the x5c header instead of kid, and iss is the "
+                "Credential Issuer Identifier URL."
+            ),
+            "example": ["MIIB..."],
+        },
+    )
 
 
 @docs(
@@ -159,8 +173,11 @@ async def supported_credential_create(request: web.Request):
 
     vct = body.pop("vct", None)
     sd_list = body.pop("sd_list", None)
+    x5c_cert_chain = body.pop("x5c_cert_chain", None)
     format_data = {"vct": vct} if vct is not None else {}
     vc_additional_data = {"vct": vct, "sd_list": sd_list}
+    if x5c_cert_chain is not None:
+        vc_additional_data["x5c_cert_chain"] = x5c_cert_chain
     record = SupportedCredential(
         **body,
         format_data=format_data,
@@ -216,8 +233,11 @@ async def supported_cred_update_helper(
     record.credential_metadata = body.get("credential_metadata", None)
     vct = body.get("vct", None)
     sd_list = body.get("sd_list", None)
+    x5c_cert_chain = body.get("x5c_cert_chain", None)
     record.format_data = {"vct": vct} if vct is not None else {}
     record.vc_additional_data = {"vct": vct, "sd_list": sd_list}
+    if x5c_cert_chain is not None:
+        record.vc_additional_data["x5c_cert_chain"] = x5c_cert_chain
 
     await record.save(session)
     return record

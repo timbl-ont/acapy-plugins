@@ -1,5 +1,7 @@
 """Issue an SD-JWT credential."""
 
+import base64
+import binascii
 import json
 import logging
 import re
@@ -12,6 +14,8 @@ from acapy_agent.admin.request_context import AdminRequestContext
 from acapy_agent.core.profile import Profile
 from acapy_agent.wallet.jwt import JWTVerifyResult
 from acapy_agent.wallet.util import bytes_to_b64
+from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from jsonpointer import EndOfList, JsonPointer, JsonPointerException
 from pydid import DIDUrl
 from sd_jwt.issuer import SDJWTIssuer, SDObj
@@ -25,7 +29,7 @@ from oid4vc.cred_processor import (
     VerifyResult,
 )
 from oid4vc.config import Config
-from oid4vc.jwt import jwt_sign, jwt_verify
+from oid4vc.jwt import jwt_sign, jwt_verify, key_from_x5c, key_material_for_kid
 from oid4vc.models.exchange import OID4VCIExchangeRecord
 from oid4vc.models.presentation import OID4VPPresentation
 from oid4vc.models.supported_cred import SupportedCredential
@@ -49,6 +53,64 @@ OBJ_CLAIMS_NEVER_SD = re.compile(r"(?:/cnf|/status)(?:/.+)*")
 
 class SDJWTError(BaseException):
     """SD-JWT Error."""
+
+
+def validate_x5c_cert_chain(x5c: Any):
+    """Validate an x5c chain: std base64 DER certificates, leaf first.
+
+    Each certificate must be signed by the next one and the leaf must hold a
+    key type supported for signing. Raises ValueError otherwise.
+    """
+    if not (isinstance(x5c, list) and x5c and all(isinstance(cert, str) for cert in x5c)):
+        raise ValueError(
+            "x5c_cert_chain must be a non-empty list of base64 DER certificates"
+        )
+    try:
+        certs = [
+            x509.load_der_x509_certificate(base64.b64decode(cert, validate=True))
+            for cert in x5c
+        ]
+    except (binascii.Error, ValueError) as err:
+        raise ValueError(f"x5c_cert_chain has an invalid certificate: {err}") from err
+    for cert, issuer in zip(certs, certs[1:]):
+        try:
+            cert.verify_directly_issued_by(issuer)
+        except (InvalidSignature, TypeError, ValueError) as err:
+            raise ValueError(
+                "x5c_cert_chain must be ordered leaf first, each certificate "
+                "issued by the next"
+            ) from err
+    key_from_x5c(x5c)
+
+
+async def _check_x5c_signing_key(
+    profile: Profile, x5c: List[str], verification_method: str
+):
+    """Ensure the x5c leaf certificate holds the credential signing key."""
+    try:
+        signing_key = await key_material_for_kid(profile, verification_method)
+        leaf_key = key_from_x5c(x5c)
+    except Exception as err:
+        raise CredProcessorError(
+            f"Could not compare x5c_cert_chain with {verification_method}: {err}"
+        ) from err
+    if signing_key.get_jwk_thumbprint() != leaf_key.get_jwk_thumbprint():
+        raise CredProcessorError(
+            "x5c_cert_chain leaf certificate does not hold the signing key "
+            f"{verification_method}"
+        )
+
+
+def credential_issuer_url(context: AdminRequestContext) -> str:
+    """Return this (tenant's) Credential Issuer Identifier URL."""
+    config = Config.from_settings(context.settings)
+    wallet_id = (
+        context.profile.settings.get("wallet.id")
+        if context.profile.settings.get("multitenant.enabled")
+        else None
+    )
+    subpath = f"/tenant/{wallet_id}" if wallet_id else ""
+    return f"{config.endpoint}{subpath}"
 
 
 @dataclass
@@ -144,8 +206,16 @@ class SdJwtCredIssueProcessor(Issuer, CredVerifier, PresVerifier):
 
         # If an x5c cert chain is configured in vc_additional_data, use x5c
         # as the key-identification header (RFC 7517 §4.7); x5c and kid are
-        # mutually exclusive.
+        # mutually exclusive. The issuer is then identified by an HTTPS URL
+        # (the Credential Issuer Identifier) rather than the signing DID.
         x5c_chain = (supported.vc_additional_data or {}).get("x5c_cert_chain")
+        if x5c_chain:
+            await _check_x5c_signing_key(
+                context.profile, x5c_chain, ex_record.verification_method
+            )
+            issuer = credential_issuer_url(context)
+        else:
+            issuer = ex_record.issuer_id
         headers = {
             "typ": supported.format,  # "vc+sd-jwt" or "dc+sd-jwt" per credential config
             **(
@@ -165,7 +235,7 @@ class SdJwtCredIssueProcessor(Issuer, CredVerifier, PresVerifier):
         claims = {
             **claims,
             "vct": vct,
-            "iss": ex_record.issuer_id,
+            "iss": issuer,
             "iat": current_time,
             "exp": current_time + int(exp_seconds),
         }
@@ -241,6 +311,9 @@ class SdJwtCredIssueProcessor(Issuer, CredVerifier, PresVerifier):
 
         if not (vc_additional_data.get("vct") or supported.format_data.get("vct")):
             raise ValueError("SD-JWT VC needs 'vct'")
+
+        if (x5c_cert_chain := vc_additional_data.get("x5c_cert_chain")) is not None:
+            validate_x5c_cert_chain(x5c_cert_chain)
 
         sd_list = vc_additional_data.get("sd_list") or []
 
