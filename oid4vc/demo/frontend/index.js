@@ -550,7 +550,6 @@ async function issue_sdjwt_credential(req, res) {
   const refreshId = req.body['refresh-id'];
 
   // Optional: sign with an X.509 chain in the JWS x5c header (see demo/sdjwt-x5c/).
-  // `did` only sets `iss` when a verification_method is given; the key is still the did:jwk.
   const useX5c = req.body['use-x5c'] === 'on';
   if (useX5c && !sdJwtX5c) {
     sdJwtX5c = await createSdJwtX5cSupportedCred(
@@ -559,7 +558,7 @@ async function issue_sdjwt_credential(req, res) {
   }
 
   const exchangeCreateOptions = {
-    did: useX5c ? sdJwtX5c.issuerUrl : issuerDID,
+    did: issuerDID,
     verification_method: issuerDID+"#0",
     supported_cred_id: useX5c ? sdJwtX5c.supportedCredId : sdJwtSupportedCredID,
     credential_subject: {
@@ -644,19 +643,21 @@ async function issue_sdjwt_credential(req, res) {
 
 // SD-JWT VC "IDCardX5c": same as IDCard but signed with an X.509 chain in the
 // JWS x5c header instead of kid. sdjwt-x5c/mint-issuer-cert.sh issues a leaf
-// over the did:jwk public key (SAN URI = issuer URL = iss) from the demo CA;
-// the private key stays in the wallet. The plugin reads the chain from
-// vc_additional_data.x5c_cert_chain, which the SD-JWT create route can't set,
-// so the record is completed via the JWT update route (it stores
-// credential_definition as vc_additional_data, leaving format_data intact).
-// iss and the SAN URI are the credential_issuer from the issuer's own metadata
-// (ISSUER_PUBLIC_URL is the issuer's public OID4VCI port inside compose).
+// over the did:jwk public key from the demo CA; the private key stays in the
+// wallet. The plugin reads the chain from vc_additional_data.x5c_cert_chain,
+// which the SD-JWT create route can't set, so the record is completed via the
+// JWT update route (it stores credential_definition as vc_additional_data,
+// leaving format_data intact).
+// The plugin sets iss to the exchange's DID (it must be a DID), so the leaf's
+// SAN URIs are the credential_issuer from the issuer's own metadata
+// (ISSUER_PUBLIC_URL is the issuer's public OID4VCI port inside compose) and
+// the issuer did:jwk, which is the iss.
 async function createSdJwtX5cSupportedCred(baseBody, headers, emit) {
   const x5cDir = process.env.SDJWT_X5C_DIR || "/app/sdjwt-x5c";
   const issuerPublicUrl = process.env.ISSUER_PUBLIC_URL || "http://issuer:8082";
   const metadataUrl = `${issuerPublicUrl}/.well-known/openid-credential-issuer/tenant/${WALLET_ID}`;
   const issuerUrl = (await (await fetch(metadataUrl)).json()).credential_issuer;
-  emit(`x5c: credential issuer (iss) from ${metadataUrl}: ${issuerUrl}`);
+  emit(`x5c: credential issuer from ${metadataUrl}: ${issuerUrl}`);
   const jwk = JSON.parse(Buffer.from(issuerDID.slice("did:jwk:".length), "base64url").toString("utf-8"));
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "sdjwt-x5c-"));
   let chainPem;
@@ -664,7 +665,7 @@ async function createSdJwtX5cSupportedCred(baseBody, headers, emit) {
     const pubPath = path.join(workDir, "pub.pem");
     fs.writeFileSync(pubPath, crypto.createPublicKey({ key: jwk, format: "jwk" })
       .export({ type: "spki", format: "pem" }));
-    chainPem = execFileSync("bash", [path.join(x5cDir, "mint-issuer-cert.sh"), pubPath, issuerUrl],
+    chainPem = execFileSync("bash", [path.join(x5cDir, "mint-issuer-cert.sh"), pubPath, issuerUrl, issuerDID],
       { encoding: "utf-8" });
   } finally {
     fs.rmSync(workDir, { recursive: true, force: true });
@@ -698,7 +699,7 @@ async function createSdJwtX5cSupportedCred(baseBody, headers, emit) {
   await call("PUT", `${API_BASE_URL}/oid4vci/credential-supported/records/jwt/${created.supported_cred_id}`,
     { ...rest, credential_definition: { vct, sd_list, x5c_cert_chain: x5c } });
   emit(`x5c: created supported credential ${created.supported_cred_id} with vc_additional_data.x5c_cert_chain`);
-  return { supportedCredId: created.supported_cred_id, issuerUrl };
+  return { supportedCredId: created.supported_cred_id };
 }
 
 // Begin Issue mDL (mso_mdoc) Credential Flow

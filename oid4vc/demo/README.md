@@ -41,7 +41,7 @@ You will need a mechanism to trigger the refresh in your wallet. One mechanism i
 
 Tick **Sign with X.509 certificate (x5c)** on the SD-JWT issue page to issue `IDCardX5c`: the same ID card, but its JWS header carries `x5c` (leaf first) instead of `kid`. Uses ES256 and has no status list.
 
-* On first use, `sdjwt-x5c/mint-issuer-cert.sh` mints a 90-day leaf certificate over the issuer did:jwk P-256 public key (`openssl -force_pubkey`; the private key stays in ACA-Py). The leaf is signed by the committed demo CA `sdjwt-x5c/issuer_ca.pem`, and its SAN `URI` is the issuer URL (`https://<issuer ngrok>/tenant/<wallet id>`, which is also the credential's `iss`), with a matching `DNS` SAN.
+* On first use, `sdjwt-x5c/mint-issuer-cert.sh` mints a 90-day leaf certificate over the issuer did:jwk P-256 public key (`openssl -force_pubkey`; the private key stays in ACA-Py). The leaf is signed by the committed demo CA `sdjwt-x5c/issuer_ca.pem`. Its SAN `URI`s are the issuer URL (`https://<issuer ngrok>/tenant/<wallet id>`) and the issuer did:jwk, with a matching `DNS` SAN. The plugin sets the credential's `iss` to the exchange's DID, so `iss` is the did:jwk; wallets that require an HTTPS `iss` with `x5c` may reject it.
 * The chain is stored in the supported credential's `vc_additional_data.x5c_cert_chain`, which the `sd_jwt_vc` plugin turns into the `x5c` header. The SD-JWT create route can't set that field, so the demo creates the record and then completes it with `PUT /oid4vci/credential-supported/records/jwt/{id}`.
 * Import `sdjwt-x5c/issuer_ca.pem` (or `.der`) into the wallet as a trusted issuer certificate.
 * After the wallet accepts the credential, check its signature, chain and `iss`/SAN match from the issuer log:
