@@ -54,3 +54,5 @@ docker compose logs issuer | node sdjwt-x5c/verify-sdjwt-x5c.mjs
 ### Verifier X.509 identity (signed presentation requests)
 
 At startup the demo mints a 90-day reader certificate over the issuer did:jwk P-256 key, signed by the committed demo root `reader-ca/reader_root.pem`, with a `DNS` SAN of the issuer ngrok host. It registers the certificate with `POST /oid4vp/x509-identity`. Every OID4VP request is then an ES256 JAR with `x5c` (leaf + root) and `client_id = x509_san_dns:<issuer ngrok host>`, which the plugin also uses as the expected KB-JWT `aud`. Wallets that only accept x5c-signed requests (e.g. Multipaz) treat a did:jwk-signed request as unsigned, put `web-origin:` in the KB-JWT `aud`, and fail verification with `Invalid audience`. Import `reader-ca/reader_root.pem` (or `.der`) into the wallet to have the verifier shown as trusted; see `reader-ca/README.md`.
+
+For a standalone, one-button verifier for the ID card (QR code, then the result with the portrait), see [`../verifier-demo`](../verifier-demo/README.md).

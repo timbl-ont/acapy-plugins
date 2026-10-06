@@ -1,0 +1,12 @@
+{
+	"name": "oid4vc-verifier-demo",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"start": "node server.js"
+	},
+	"dependencies": {
+		"express": "^4.22.2",
+		"qrcode-svg": "^1.1.0"
+	}
+}

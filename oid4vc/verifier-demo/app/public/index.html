@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ID check · OpenID4VP verifier</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main class="card">
+    <header class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3Z"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>
+      </span>
+      <div>
+        <h1>ID check</h1>
+        <p class="subtitle">Verify an ID card from a digital wallet</p>
+      </div>
+    </header>
+
+    <section id="view-start" class="view">
+      <div class="hero" aria-hidden="true">
+        <svg viewBox="0 0 64 44"><rect x="2" y="2" width="60" height="40" rx="6"/><circle cx="20" cy="18" r="6"/><path d="M10 34c1.5-5 5.5-7.5 10-7.5s8.5 2.5 10 7.5"/><path d="M38 15h16M38 22h16M38 29h10"/></svg>
+      </div>
+      <p class="lead">The holder shares their <strong>name</strong>, <strong>photo</strong> and <strong>proof of age (18+)</strong> from the Example ID card in their wallet.</p>
+      <button id="start" class="btn primary" type="button">Verify</button>
+      <p id="start-error" class="inline-error" role="alert" hidden></p>
+    </section>
+
+    <section id="view-scan" class="view" hidden>
+      <h2>Scan with your wallet</h2>
+      <div class="qr-frame">
+        <div id="qr" class="qr" role="img" aria-label="Presentation request QR code"></div>
+        <div class="qr-overlay" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M10.5 18.5h3"/></svg>
+        </div>
+      </div>
+      <p class="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><span id="scan-status">Waiting for a wallet…</span></p>
+      <a id="open-wallet" class="link" href="#">Open a wallet on this device</a>
+      <button id="cancel" class="btn ghost" type="button">Cancel</button>
+    </section>
+
+    <section id="view-success" class="view" hidden>
+      <div class="outcome ok">
+        <svg class="badge" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="24"/><path d="m15 27 7.5 7.5L38 19"/></svg>
+        <h2>Verified</h2>
+        <p>Issuer signature and holder binding checked</p>
+      </div>
+      <div class="holder">
+        <img id="photo" class="photo" alt="Portrait shared by the holder" hidden>
+        <div id="avatar" class="photo avatar" aria-hidden="true"></div>
+        <div class="holder-text">
+          <p id="holder-name" class="holder-name"></p>
+          <span id="age-badge" class="pill" hidden></span>
+        </div>
+      </div>
+      <dl id="claims" class="claims"></dl>
+      <dl id="credential" class="credential"></dl>
+      <button class="btn primary restart" type="button">Verify another</button>
+    </section>
+
+    <section id="view-failure" class="view" hidden>
+      <div class="outcome fail">
+        <svg class="badge" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="24"/><path d="m18 18 16 16M34 18 18 34"/></svg>
+        <h2>Not verified</h2>
+        <p id="failure-summary"></p>
+      </div>
+      <p id="failure-detail" class="detail" hidden></p>
+      <button class="btn primary restart" type="button">Try again</button>
+    </section>
+  </main>
+  <footer>ACA-Py OpenID4VC plugin demo · not for production use</footer>
+</body>
+</html>

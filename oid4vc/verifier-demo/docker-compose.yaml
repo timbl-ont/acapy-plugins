@@ -1,0 +1,116 @@
+# Standalone SD-JWT VC verifier: an ACA-Py agent running the oid4vc plugin as a
+# verifier, an ngrok tunnel for its public OID4VP routes, and a small web app.
+# Host ports differ from ../demo so both stacks can run side by side.
+services:
+
+  agent:
+    # Same image as ../demo (built from this repo).
+    image: oid4vc
+    build:
+      dockerfile: docker/Dockerfile
+      context: ../
+    ports:
+      - "3011:3001" # admin API, for debugging only
+    volumes:
+      - ../docker/entrypoint.sh:/entrypoint.sh:ro,z
+    environment:
+      RUST_LOG: warn
+      TUNNEL_ENDPOINT: http://ngrok:4040
+      OID4VCI_HOST: 0.0.0.0
+      OID4VCI_PORT: 8082
+      OID4VCI_STATUS_HANDLER: status_list.v1_0.status_handler
+    entrypoint: >
+      /bin/sh -c '/entrypoint.sh aca-py "$$@"' --
+    command: >
+      start
+        --inbound-transport http 0.0.0.0 3000
+        --outbound-transport http
+        --endpoint http://agent:3000
+        --admin 0.0.0.0 3001
+        --admin-insecure-mode
+        --no-ledger
+        --wallet-type askar
+        --emit-new-didcomm-prefix
+        --wallet-storage-type default
+        --wallet-name verifier
+        --wallet-key insecure
+        --auto-provision
+        --plugin oid4vc
+        --plugin jwt_vc_json
+        --plugin sd_jwt_vc
+        --plugin mso_mdoc
+        --plugin status_list.v1_0
+        --multitenant
+        --multitenant-admin
+        --jwt-secret insecure
+        --log-level INFO
+        --multitenancy-config wallet_type=single-wallet-askar key_derivation_method=RAW
+        --block-plugin acapy_agent.anoncreds
+        --block-plugin acapy_agent.ledger
+        --block-plugin acapy_agent.revocation
+        --block-plugin acapy_agent.messaging.schemas
+        --block-plugin acapy_agent.messaging.credential_definitions
+        --block-plugin acapy_agent.revocation_anoncreds
+        --block-plugin acapy_agent.anoncreds.default.did_indy
+        --block-plugin acapy_agent.anoncreds.default.did_web
+        --block-plugin acapy_agent.anoncreds.default.legacy_indy
+        --block-plugin acapy_agent.vc
+        --block-plugin acapy_agent.vc.data_integrity
+        --block-plugin acapy_agent.messaging.jsonld
+        --block-plugin acapy_agent.anoncreds.revocation
+        --block-plugin acapy_agent.connections
+        --block-plugin acapy_agent.did.indy
+        --block-plugin acapy_agent.holder
+        --block-plugin acapy_agent.protocols.actionmenu
+        --block-plugin acapy_agent.protocols.basicmessage
+        --block-plugin acapy_agent.protocols.coordinate_mediation
+        --block-plugin acapy_agent.protocols.didexchange
+        --block-plugin acapy_agent.protocols.discovery
+        --block-plugin acapy_agent.protocols.endorse_transaction
+        --block-plugin acapy_agent.protocols.introduction
+        --block-plugin acapy_agent.protocols.issue_credential
+        --block-plugin acapy_agent.protocols.notification
+        --block-plugin acapy_agent.protocols.out_of_band
+        --block-plugin acapy_agent.protocols.present_proof
+        --block-plugin acapy_agent.protocols.problem_report
+        --block-plugin acapy_agent.protocols.revocation_notification
+        --block-plugin acapy_agent.protocols.routing
+        --block-plugin acapy_agent.protocols.trustping
+        --block-plugin acapy_agent.resolver
+    healthcheck:
+      test: curl -s -o /dev/null -w '%{http_code}' "http://localhost:3001/status/live" | grep "200" > /dev/null
+      start_period: 30s
+      interval: 7s
+      timeout: 5s
+      retries: 5
+
+  ngrok:
+    image: ngrok/ngrok
+    restart: unless-stopped
+    hostname: ngrok
+    ports:
+      - "4041:4040"
+    volumes:
+      - ./ngrok.yml:/etc/ngrok.yml:ro,z
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    command: ["start", "--all", "--config", "/etc/ngrok.yml"]
+
+  verifier:
+    build:
+      context: ./app
+    restart: on-failure
+    ports:
+      - "3003:3000"
+    volumes:
+      - ./app/server.js:/app/server.js:ro,z
+      - ./app/public:/app/public:ro,z
+      - ../demo/reader-ca:/app/reader-ca:ro,z
+      - ../demo/sdjwt-x5c/issuer_ca.pem:/app/issuer_ca.pem:ro,z
+    environment:
+      API_BASE_URL: http://agent:3001
+      AGENT_PUBLIC_URL: http://agent:8082
+      TUNNEL_ENDPOINT: http://ngrok:4040
+    depends_on:
+      agent:
+        condition: service_healthy

@@ -1,0 +1,12 @@
+version: 3
+tunnels:
+  # ../docker/entrypoint.sh reads the public URL of the tunnel named "issuer".
+  issuer:
+    proto: http
+    addr: agent:8082
+    # domain: your-custom-domain
+  # The verifier web UI (open this URL; works from a phone for same-device flows).
+  verifier:
+    proto: http
+    addr: verifier:3000
+    # domain: your-custom-domain
