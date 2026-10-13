@@ -1,25 +1,22 @@
 """Helper functions for OID4VC routes."""
 
-import secrets
-
 from acapy_agent.admin.request_context import AdminRequestContext
 from acapy_agent.core.profile import Profile
 from acapy_agent.messaging.models.base import BaseModelError
 from acapy_agent.storage.error import StorageError
 from aiohttp import web
 
-from ..app_resources import AppResources
+from ..auth_providers import (
+    AuthContext,
+    AuthServerConfigError,
+    AuthServerRegistry,
+    default_registry,
+    provider_type,
+)
 from ..config import Config
 from ..models.exchange import OID4VCIExchangeRecord
 from ..models.supported_cred import SupportedCredential
-from ..utils import (
-    get_auth_header,
-    get_auth_server_url,
-    get_first_auth_server,
-    get_tenant_subpath,
-)
-
-CODE_BYTES = 32
+from ..utils import get_first_auth_server
 
 
 async def _create_pre_auth_code(
@@ -30,42 +27,15 @@ async def _create_pre_auth_code(
     credential_configuration_id: str | None = None,
     user_pin: str | None = None,
 ) -> str:
-    """Create a secure random pre-authorized code."""
-
-    if auth_server:
-        private_url = get_auth_server_url(auth_server)
-        subpath = get_tenant_subpath(profile, tenant_prefix="/tenant")
-        issuer_server_url = f"{config.endpoint}{subpath}"
-
-        grants_endpoint = f"{private_url}/grants/pre-authorized-code"
-
-        auth_header = await get_auth_header(
-            profile, auth_server, issuer_server_url, grants_endpoint
-        )
-        user_pin_required = user_pin is not None
-        resp = await AppResources.get_http_client().post(
-            grants_endpoint,
-            json={
-                "subject_id": subject_id,
-                "user_pin_required": user_pin_required,
-                "user_pin": user_pin,
-                "authorization_details": [
-                    {
-                        "type": "openid_credential",
-                        "credential_configuration_id": credential_configuration_id,
-                    }
-                ],
-            },
-            headers={"Authorization": f"{auth_header}"},
-        )
-        if resp.status != 200:
-            body = await resp.text()
-            raise web.HTTPBadGateway(reason=f"Auth server returned {resp.status}: {body}")
-        data = await resp.json()
-        code = data["pre_authorized_code"]
-    else:
-        code = secrets.token_urlsafe(CODE_BYTES)
-    return code
+    """Create a pre-authorized code via the configured authorization server provider."""
+    registry = profile.inject_or(AuthServerRegistry) or default_registry()
+    provider = registry.get(provider_type(auth_server))
+    return await provider.create_pre_authorized_code(
+        AuthContext(profile, config, dict(auth_server or {})),
+        subject_id=subject_id,
+        credential_configuration_id=credential_configuration_id,
+        user_pin=user_pin,
+    )
 
 
 async def _parse_cred_offer(context: AdminRequestContext, exchange_id: str) -> dict:
@@ -81,6 +51,8 @@ async def _parse_cred_offer(context: AdminRequestContext, exchange_id: str) -> d
                 session, record.supported_cred_id
             )
             auth_server = await get_first_auth_server(session, context.profile)
+            if auth_server is None:
+                auth_server = config.auth_server
             record.code = await _create_pre_auth_code(
                 context.profile,
                 config,
@@ -89,10 +61,15 @@ async def _parse_cred_offer(context: AdminRequestContext, exchange_id: str) -> d
                 supported.identifier,
                 record.pin,
             )
+            # A new code starts a fresh single-use / tx_code attempt budget.
+            record.pin_attempts = 0
+            record.code_redeemed_at = None
             record.state = OID4VCIExchangeRecord.STATE_OFFER_CREATED
             await record.save(session, reason="Credential offer created")
     except (StorageError, BaseModelError) as err:
         raise web.HTTPBadRequest(reason=err.roll_up) from err
+    except AuthServerConfigError as err:
+        raise web.HTTPBadRequest(reason=str(err)) from err
 
     user_pin_required: bool = record.pin is not None
     wallet_id = (

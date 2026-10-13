@@ -9,6 +9,7 @@ from .credential import dereference_cred_offer, issue_cred
 from .metadata import credential_issuer_metadata, openid_configuration
 from .nonce import get_nonce
 from .notification import receive_notification
+from .redeem import redeem_pre_auth_code_route
 from .status_list import get_status_list
 from .token import token
 from .verification import get_request, post_response
@@ -73,6 +74,9 @@ async def register(app: web.Application, multitenant: bool, context: InjectionCo
         # Spec: https://identity.foundation/.well-known/resources/did-configuration/
         web.post(f"{subpath}/token", token),
         web.post(f"{subpath}/notification", receive_notification),
+        # Back-channel code redemption for external authorization servers that
+        # support it (Keycloak extension); 404 for other providers.
+        web.post(f"{subpath}/oid4vci/pre-auth/redeem", redeem_pre_auth_code_route),
         web.post(f"{subpath}/credential", issue_cred),
         web.get(f"{subpath}/oid4vp/request/{{request_id}}", get_request),
         web.post(f"{subpath}/oid4vp/response/{{presentation_id}}", post_response),

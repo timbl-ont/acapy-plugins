@@ -56,11 +56,12 @@ async def test_create_pre_auth_code(monkeypatch, profile, config):
     mock_response.json = AsyncMock(return_value={"pre_authorized_code": "code123"})
     mock_client.post = AsyncMock(return_value=mock_response)
     monkeypatch.setattr(
-        "oid4vc.routes.helpers.AppResources.get_http_client", lambda: mock_client
+        "oid4vc.auth_providers.reference.AppResources.get_http_client",
+        lambda: mock_client,
     )
     # Patch get_auth_header to return a dummy header
     monkeypatch.setattr(
-        "oid4vc.routes.helpers.get_auth_header",
+        "oid4vc.auth_providers.reference.get_auth_header",
         AsyncMock(return_value="Bearer dummyheader"),
     )
     auth_server = {

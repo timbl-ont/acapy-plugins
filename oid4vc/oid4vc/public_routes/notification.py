@@ -12,6 +12,9 @@ from aiohttp_apispec import docs
 from marshmallow import fields
 
 from ..models.exchange import OID4VCIExchangeRecord
+from ..config import Config
+from ..dpop import DPOP_HEADER
+from ..utils import public_request_url
 from .token import check_token
 
 LOGGER = logging.getLogger(__name__)
@@ -91,7 +94,12 @@ async def _receive_notification_inner(request: web.Request) -> web.Response:
     """Inner implementation; raises HTTPException on all errors."""
     # Auth check first — raises HTTPUnauthorized on failure
     context: AdminRequestContext = request["context"]
-    await check_token(context, request.headers.get("Authorization"))
+    await check_token(
+        context,
+        request.headers.get("Authorization"),
+        dpop_proof=request.headers.get(DPOP_HEADER),
+        htu=public_request_url(Config.from_settings(context.settings), request),
+    )
 
     try:
         body = await request.json()
