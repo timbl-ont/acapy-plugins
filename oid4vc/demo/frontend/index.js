@@ -60,6 +60,7 @@ const logger = pino({
 // Setup the Express app
 
 const app = express();
+app.locals.authServer = (process.env.AUTH_SERVER || "reference").toLowerCase();
 app.set("views", path.join(__dirname, "templates"));
 app.set('view engine', 'ejs');
 app.use(express.urlencoded({extended: false}));
@@ -75,6 +76,21 @@ const API_KEY = process.env.API_KEY;
 const AUTHSERVER_NGROK_URL = process.env.AUTHSERVER_NGROK_URL;
 const ADMIN_MANAGE_AUTH_TOKEN = process.env.ADMIN_MANAGE_AUTH_TOKEN;
 const TENANT_SECRET = process.env.TENANT_SECRET;
+
+// Authorization server used by the issuer tenant: "reference" (default, the
+// oid4vc/auth_server), "keycloak" (docker-compose.keycloak.yaml) or "builtin".
+const AUTH_SERVER = (process.env.AUTH_SERVER || "reference").toLowerCase();
+const ISSUER_NGROK_URL = process.env.ISSUER_NGROK_URL;
+const KEYCLOAK_URL = process.env.KEYCLOAK_URL || "http://keycloak:8080";
+const KEYCLOAK_NGROK_URL = process.env.KEYCLOAK_NGROK_URL;
+const KEYCLOAK_ADMIN_USERNAME = process.env.KEYCLOAK_ADMIN_USERNAME || "admin";
+const KEYCLOAK_ADMIN_PASSWORD = process.env.KEYCLOAK_ADMIN_PASSWORD || "admin";
+const KEYCLOAK_REQUIRE_ATTESTATION = process.env.KEYCLOAK_REQUIRE_ATTESTATION === "true";
+const KEYCLOAK_REQUIRE_DPOP = process.env.KEYCLOAK_REQUIRE_DPOP !== "false";
+const KEYCLOAK_WALLET_CLIENT_ID = process.env.KEYCLOAK_WALLET_CLIENT_ID;
+const KEYCLOAK_ATTESTER_JWKS = process.env.KEYCLOAK_ATTESTER_JWKS;
+const KEYCLOAK_ATTESTER_JWKS_URL = process.env.KEYCLOAK_ATTESTER_JWKS_URL;
+const KEYCLOAK_ANONYMOUS_CLIENT_ID = "oid4vci-wallet-public";
 
 //certificate and private key to import for mDL issuance
 //expires 2036, private_key is PEM base64 encoded PKCS #8.
@@ -1371,6 +1387,135 @@ async function initializeAuthServer() {
   }
 }
 
+// Configure a Keycloak realm for the tenant (AUTH_SERVER=keycloak).
+// One realm per issuer tenant. Keycloak runs the extension in ../keycloak:
+// it authenticates the wallet (optionally with wallet attestation), requires
+// DPoP, and redeems the pre-authorized code on the issuer's admin API.
+const KEYCLOAK_REALM = `oid4vci-${WALLET_ID}`;
+
+async function initializeKeycloak() {
+  try {
+    const tokenRes = await axios.post(
+      `${KEYCLOAK_URL}/realms/master/protocol/openid-connect/token`,
+      new URLSearchParams({
+        grant_type: "password",
+        client_id: "admin-cli",
+        username: KEYCLOAK_ADMIN_USERNAME,
+        password: KEYCLOAK_ADMIN_PASSWORD,
+      }),
+    );
+    const headers = { Authorization: `Bearer ${tokenRes.data.access_token}` };
+
+    const attesterConfigured = Boolean(
+      KEYCLOAK_WALLET_CLIENT_ID && (KEYCLOAK_ATTESTER_JWKS || KEYCLOAK_ATTESTER_JWKS_URL)
+    );
+    if (KEYCLOAK_REQUIRE_ATTESTATION && !attesterConfigured) {
+      logger.warn(
+        "KEYCLOAK_REQUIRE_ATTESTATION=true but no KEYCLOAK_WALLET_CLIENT_ID and " +
+        "KEYCLOAK_ATTESTER_JWKS / KEYCLOAK_ATTESTER_JWKS_URL: all token requests will be rejected"
+      );
+    }
+
+    const realm = {
+      realm: KEYCLOAK_REALM,
+      displayName: `OID4VCI issuer ${WALLET_ID}`,
+      enabled: true,
+      sslRequired: "external",
+      accessTokenLifespan: 300,
+      attributes: {
+        // The issuer's admin API, reached over the compose network.
+        "oid4vci.redeem.url": `${API_BASE_URL}/oid4vci/tenant/${WALLET_ID}/pre-auth/redeem`,
+        "oid4vci.redeem.client.auth": "private_key_jwt",
+        "oid4vci.credential.issuer": `${ISSUER_NGROK_URL}/tenant/${WALLET_ID}`,
+        "oid4vci.require.client.attestation": String(KEYCLOAK_REQUIRE_ATTESTATION),
+        "oid4vci.require.dpop": String(KEYCLOAK_REQUIRE_DPOP),
+        "oid4vci.anonymous.client.id": KEYCLOAK_ANONYMOUS_CLIENT_ID,
+        "oid4vci.holder.username": "oid4vci-holder",
+      },
+      users: [
+        {
+          username: "oid4vci-holder",
+          enabled: true,
+          email: "oid4vci-holder@invalid.example",
+          emailVerified: true,
+          firstName: "OID4VCI",
+          lastName: "Holder",
+          credentials: [],
+        },
+      ],
+      clients: [
+        {
+          // Wallets that present no client authentication (attestation off).
+          clientId: KEYCLOAK_ANONYMOUS_CLIENT_ID,
+          name: "Wallets without client authentication",
+          enabled: true,
+          protocol: "openid-connect",
+          publicClient: true,
+          standardFlowEnabled: false,
+          implicitFlowEnabled: false,
+          directAccessGrantsEnabled: false,
+          fullScopeAllowed: false,
+          defaultClientScopes: [],
+          optionalClientScopes: [],
+        },
+      ],
+      identityProviders: [],
+    };
+
+    if (attesterConfigured) {
+      // Trust the wallet provider's attester and register its wallet client
+      // with attestation-based client authentication.
+      realm.identityProviders.push({
+        alias: "wallet-attester",
+        displayName: "Wallet attester",
+        providerId: "default-trust",
+        enabled: true,
+        hideOnLogin: true,
+        config: KEYCLOAK_ATTESTER_JWKS_URL
+          ? { useJwksUrl: "true", jwksUrl: KEYCLOAK_ATTESTER_JWKS_URL }
+          : { useJwksUrl: "false", publicKeySignatureVerifier: KEYCLOAK_ATTESTER_JWKS },
+      });
+      realm.clients.push({
+        clientId: KEYCLOAK_WALLET_CLIENT_ID,
+        name: "Wallet (attestation-based client authentication)",
+        enabled: true,
+        protocol: "openid-connect",
+        publicClient: false,
+        clientAuthenticatorType: "attestation-based",
+        standardFlowEnabled: false,
+        implicitFlowEnabled: false,
+        directAccessGrantsEnabled: false,
+        serviceAccountsEnabled: false,
+        fullScopeAllowed: false,
+        defaultClientScopes: [],
+        optionalClientScopes: [],
+        attributes: {
+          attester_trust_idps: "wallet-attester",
+          "dpop.bound.access.tokens": String(KEYCLOAK_REQUIRE_DPOP),
+        },
+      });
+    }
+
+    try {
+      await axios.post(`${KEYCLOAK_URL}/admin/realms`, realm, { headers });
+      logger.info(`Keycloak realm created: ${KEYCLOAK_REALM}`);
+    } catch (err) {
+      if (err?.response?.status === 409) {
+        logger.info(`Keycloak realm already exists: ${KEYCLOAK_REALM}`);
+      } else {
+        throw err;
+      }
+    }
+    logger.info(
+      `Keycloak authorization server: ${KEYCLOAK_NGROK_URL}/realms/${KEYCLOAK_REALM} ` +
+      `(wallet attestation ${KEYCLOAK_REQUIRE_ATTESTATION ? "required" : "off"}, ` +
+      `DPoP ${KEYCLOAK_REQUIRE_DPOP ? "required" : "optional"})`
+    );
+  } catch (err) {
+    logger.error("Keycloak initialization failed:", err?.response?.data || err.message);
+  }
+}
+
 // Configure the Issuer to use the use the Auth server and define issuer metadata.
 async function initializeIssuerMetadata() {
   try {
@@ -1383,9 +1528,10 @@ async function initializeIssuerMetadata() {
       commonHeaders["X-API-KEY"] = API_KEY;
     }
 
-    const payload = {
-      authorization_servers: [
+    const authorizationServers = {
+      reference: [
         {
+          type: "reference",
           public_url: `${AUTHSERVER_NGROK_URL}/tenants/${WALLET_ID}`,
           private_url: `http://auth-server:9001/tenants/${WALLET_ID}`,
           auth_type: "client_secret_basic",
@@ -1394,8 +1540,23 @@ async function initializeIssuerMetadata() {
             client_secret: TENANT_SECRET
           }
         }
-      ]
-    };
+      ],
+      // Keycloak redeems codes on the issuer admin API, authenticated with a
+      // client assertion signed by the realm key (private_key_jwt, the default).
+      keycloak: [
+        {
+          type: "keycloak",
+          public_url: `${KEYCLOAK_NGROK_URL}/realms/${KEYCLOAK_REALM}`,
+          private_url: `${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}`,
+          require_dpop: KEYCLOAK_REQUIRE_DPOP
+        }
+      ],
+      builtin: [],
+    }[AUTH_SERVER];
+    if (!authorizationServers) {
+      throw new Error(`Unknown AUTH_SERVER '${AUTH_SERVER}' (reference | keycloak | builtin)`);
+    }
+    const payload = { authorization_servers: authorizationServers };
 
     const response = await axios.put(
       `${API_BASE_URL}/oid4vci/issuer/configuration`,
@@ -1479,7 +1640,12 @@ async function initializeMdocSigningKey() {
   }
 }
 
-await initializeAuthServer();
+logger.info(`Authorization server: ${AUTH_SERVER}`);
+if (AUTH_SERVER === "reference") {
+  await initializeAuthServer();
+} else if (AUTH_SERVER === "keycloak") {
+  await initializeKeycloak();
+}
 await initializeIssuerMetadata();
 await initializeSigningDid();
 await initializeMdocSigningKey();

@@ -36,3 +36,53 @@ When a credential is refreshed it is updated and made available to the /credenti
 To retrieve the credential a refresh token is required. In the future, dPOP will also be required.
 
 You will need a mechanism to trigger the refresh in your wallet. One mechanism is to monitor the status of the credential via the credential status list. Bifold supports this option if configured to do so.
+With Keycloak as the authorization server, no refresh token is issued, so
+credential refresh is not available.
+
+### Keycloak as the authorization server
+
+By default the demo uses the reference authorization server
+([`../auth_server`](../auth_server)). To use Keycloak instead, add the
+Keycloak override:
+
+```
+docker compose -f docker-compose.yaml -f docker-compose.keycloak.yaml up --build
+```
+
+This adds a Keycloak service, built from [`../keycloak`](../keycloak/README.md)
+with the OID4VCI pre-authorized code extension, and an ngrok tunnel for it
+(`ngrok.keycloak.yml`). At startup the demo app:
+
+1. creates a realm `oid4vci-<wallet id>` for its issuer tenant through the
+   Keycloak admin API, with the generic holder user and the wallet client(s);
+2. sets the tenant's authorization server to that realm
+   (`PUT /oid4vci/issuer/configuration` with `"type": "keycloak"`).
+
+Wallets then get their access token from Keycloak (through its ngrok URL)
+instead of the reference authorization server. Keycloak redeems the
+pre-authorized code on the issuer's admin API
+(`/oid4vci/tenant/<wallet id>/pre-auth/redeem`), authenticating with a client
+assertion signed by the realm key. Issuance in the UI is unchanged: JWT,
+SD-JWT and mdoc offers work as before. The navigation bar shows which
+authorization server is in use.
+
+Settings (in `.env`, see `.env.example`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KEYCLOAK_REQUIRE_ATTESTATION` | `false` | Require wallet attestation (ABCA). Off so any wallet works. |
+| `KEYCLOAK_WALLET_CLIENT_ID` | — | Your wallet's `client_id`, registered as an attestation-based client |
+| `KEYCLOAK_ATTESTER_JWKS` / `KEYCLOAK_ATTESTER_JWKS_URL` | — | Your wallet provider's attester public keys (a one-line JWKS JSON, or a JWKS URL) |
+| `KEYCLOAK_REQUIRE_DPOP` | `true` | Require DPoP on the token request. Set `false` for wallets that don't send DPoP. |
+| `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | `admin` / `admin` | Keycloak admin account |
+| `KEYCLOAK_NGROK_URL` | from ngrok | Static Keycloak URL, if you have one |
+
+To use wallet attestation, set `KEYCLOAK_REQUIRE_ATTESTATION=true`,
+`KEYCLOAK_WALLET_CLIENT_ID` and one of the attester settings. The demo app
+then adds a trust identity provider for the attester and an
+attestation-based client for the wallet. Wallets without attestation are
+rejected in that mode.
+
+The Keycloak admin console is at <http://localhost:8180>. The scripted
+end-to-end test for the same flow is in
+[`../keycloak/e2e`](../keycloak/README.md#end-to-end-test).

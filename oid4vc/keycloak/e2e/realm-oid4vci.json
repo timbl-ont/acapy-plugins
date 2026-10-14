@@ -4,7 +4,8 @@
   "sslRequired": "none",
   "accessTokenLifespan": 300,
   "attributes": {
-    "oid4vci.redeem.url": "http://issuer:8082/oid4vci/pre-auth/redeem",
+    "oid4vci.redeem.url": "http://issuer:3001/oid4vci/pre-auth/redeem",
+    "oid4vci.redeem.client.auth": "private_key_jwt",
     "oid4vci.credential.issuer": "http://issuer:8082",
     "oid4vci.require.client.attestation": "true",
     "oid4vci.require.dpop": "true",

@@ -1,15 +1,17 @@
-"""Demo wallet: OID4VCI pre-authorized code flow with Keycloak as the AS.
+"""End-to-end test: OID4VCI pre-authorized code flow with Keycloak as the AS.
 
-Drives the whole flow against the compose stack:
+A scripted wallet drives the whole flow against the compose stack:
 
 1. issuer controller creates a credential configuration and an offer with a tx_code;
 2. wallet discovers the authorization server from the issuer metadata;
 3. negative checks: token request without wallet attestation, wrong tx_code;
 4. token request to Keycloak with wallet attestation (ABCA) + DPoP;
 5. nonce + credential request to the issuer with the DPoP-bound token;
-6. negative check: the DPoP-bound token used as a Bearer token.
+6. negative checks: the DPoP-bound token used as a Bearer token; the redeem
+   endpoint is absent from the public port and rejects unauthenticated calls
+   on the admin port.
 
-DEMO ONLY: the attester key in attester-demo-key.json is public.
+TEST ONLY: the attester key in attester-demo-key.json is public.
 """
 
 import base64
@@ -304,6 +306,23 @@ def main():
         ),
         401,
         "rejected",
+    )
+
+    step("Negative: redeem endpoint (trusted back channel)")
+    expect(
+        requests.post(f"{issuer}/oid4vci/pre-auth/redeem", data={}, timeout=10),
+        404,
+        "not served on the public OID4VCI port",
+    )
+    expect(
+        requests.post(
+            f"{ADMIN_URL}/oid4vci/pre-auth/redeem",
+            data={"pre_authorized_code": code, "client_id": "anyone"},
+            timeout=10,
+        ),
+        401,
+        "admin port: rejected without Keycloak's client authentication",
+        error="invalid_client",
     )
     print("\nDone.")
     print(

@@ -1,0 +1,54 @@
+# Demo with Keycloak as the OID4VCI authorization server.
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.keycloak.yaml up --build
+#
+# Adds Keycloak (built with the extension in ../keycloak) and its ngrok tunnel,
+# and switches the demo app to configure a Keycloak realm for its tenant
+# instead of the reference authorization server. See README.md.
+
+services:
+  keycloak:
+    build:
+      context: ../keycloak
+      dockerfile: Dockerfile
+    # No fixed hostname: wallets reach Keycloak through ngrok, the issuer and
+    # demo app over the compose network. The realm issuer (token iss,
+    # attestation PoP aud) comes from the ngrok host via X-Forwarded-*.
+    command: ["start-dev", "--proxy-headers=xforwarded", "--hostname-strict=false"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HEALTH_ENABLED: "true"
+      KC_LOG_LEVEL: INFO,org.openwallet.acapy:DEBUG
+    ports:
+      - "8180:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"UP\"' <&3"]
+      start_period: 30s
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  ngrok:
+    volumes:
+      - ./ngrok.keycloak.yml:/etc/ngrok.yml:ro
+
+  demo-app:
+    environment:
+      AUTH_SERVER: keycloak
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      # Wallet attestation (ABCA) is off by default so any wallet can be used.
+      # To require it, set KEYCLOAK_REQUIRE_ATTESTATION=true and provide your
+      # wallet provider's attester keys (KEYCLOAK_ATTESTER_JWKS or
+      # KEYCLOAK_ATTESTER_JWKS_URL) and the wallet's client_id
+      # (KEYCLOAK_WALLET_CLIENT_ID) in .env.
+      KEYCLOAK_REQUIRE_ATTESTATION: ${KEYCLOAK_REQUIRE_ATTESTATION:-false}
+      KEYCLOAK_REQUIRE_DPOP: ${KEYCLOAK_REQUIRE_DPOP:-true}
+      KEYCLOAK_WALLET_CLIENT_ID: ${KEYCLOAK_WALLET_CLIENT_ID:-}
+      KEYCLOAK_ATTESTER_JWKS: ${KEYCLOAK_ATTESTER_JWKS:-}
+      KEYCLOAK_ATTESTER_JWKS_URL: ${KEYCLOAK_ATTESTER_JWKS_URL:-}
+    depends_on:
+      keycloak:
+        condition: service_healthy
