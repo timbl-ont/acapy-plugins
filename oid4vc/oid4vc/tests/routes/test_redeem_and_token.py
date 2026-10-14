@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import web
+from yarl import URL
 
 from oid4vc.auth_providers import AuthContext, AuthServerProvider, BackChannelAuthError
 from oid4vc.jose_util import jwk_thumbprint
@@ -13,7 +14,7 @@ from oid4vc.models.supported_cred import SupportedCredential
 
 from ..jose_helpers import dpop_proof, ec_key, public_jwk
 
-_redeem_module = importlib.import_module("oid4vc.public_routes.redeem")
+_redeem_module = importlib.import_module("oid4vc.routes.pre_auth_redeem")
 _token_module = importlib.import_module("oid4vc.public_routes.token")
 
 
@@ -24,17 +25,22 @@ class _RedeemingProvider(AuthServerProvider):
     def __init__(self, authenticated=True):
         self.authenticated = authenticated
 
-    async def authenticate_back_channel(self, ctx, request):
+    async def authenticate_back_channel(self, ctx, params, endpoint_url):
+        self.seen = (dict(params), endpoint_url)
         if not self.authenticated:
             raise BackChannelAuthError("nope")
 
 
-def _request(context, body=None, headers=None, path="/oid4vci/pre-auth/redeem"):
+def _request(
+    context, body=None, headers=None, path="/oid4vci/pre-auth/redeem", match_info=None
+):
     request = MagicMock()
     request.__getitem__ = lambda _, k: {"context": context}[k]
     request.headers = headers or {}
     request.path = path
-    request.json = AsyncMock(return_value=body or {})
+    request.match_info = match_info or {}
+    request.url = URL(f"http://issuer:3001{path}")
+    request.post = AsyncMock(return_value=body or {})
     return request
 
 
@@ -66,13 +72,19 @@ def _use_provider(monkeypatch, context, provider):
 @pytest.mark.asyncio
 async def test_redeem_success(monkeypatch, context):
     record = await _offer(context, pin="4321")
-    _use_provider(monkeypatch, context, _RedeemingProvider())
+    provider = _RedeemingProvider()
+    _use_provider(monkeypatch, context, provider)
     resp = await _redeem_module.redeem_pre_auth_code_route(
         cast(
             web.Request,
             _request(
                 context,
-                {"pre_authorized_code": "code-xyz", "tx_code": "4321", "client_id": "w"},
+                {
+                    "pre_authorized_code": "code-xyz",
+                    "tx_code": "4321",
+                    "wallet_client_id": "w",
+                    "client_assertion": "x",
+                },
             ),
         )
     )
@@ -80,6 +92,10 @@ async def test_redeem_success(monkeypatch, context):
     assert resp.status == 200
     assert body["refresh_id"] == record.refresh_id
     assert body["credential_configuration_ids"] == ["MyCred"]
+    # Credentials and the endpoint URL are handed to the provider for auth
+    params, endpoint_url = provider.seen
+    assert params["client_assertion"] == "x"
+    assert endpoint_url == "http://issuer:3001/oid4vci/pre-auth/redeem"
 
     # Single use
     resp = await _redeem_module.redeem_pre_auth_code_route(
@@ -112,6 +128,22 @@ async def test_redeem_not_available_for_builtin(context):
     with pytest.raises(web.HTTPNotFound):
         await _redeem_module.redeem_pre_auth_code_route(
             cast(web.Request, _request(context, {"pre_authorized_code": "x"}))
+        )
+
+
+@pytest.mark.asyncio
+async def test_redeem_tenant_route_without_multitenancy(context):
+    with pytest.raises(web.HTTPNotFound):
+        await _redeem_module.redeem_pre_auth_code_route(
+            cast(
+                web.Request,
+                _request(
+                    context,
+                    {"pre_authorized_code": "x"},
+                    path="/oid4vci/tenant/abc/pre-auth/redeem",
+                    match_info={"wallet_id": "abc"},
+                ),
+            )
         )
 
 

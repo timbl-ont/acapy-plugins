@@ -9,6 +9,7 @@ top of ``cryptography``.
 
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import time
@@ -164,6 +165,21 @@ def verify_jws(
     if alg not in allowed_algs:
         raise JoseError(f"alg not allowed: {alg}")
     if not verify_signature(alg, jwk, signing_input, signature):
+        raise JoseError("invalid signature")
+    return header, payload
+
+
+HMAC_ALGS = {"HS256": hashlib.sha256, "HS384": hashlib.sha384, "HS512": hashlib.sha512}
+
+
+def verify_hmac_jws(token: str, secret: str) -> Tuple[dict, dict]:
+    """Verify an HMAC-signed compact JWS (``client_secret_jwt``)."""
+    header, payload, signing_input, signature = decode_jws(token)
+    digest = HMAC_ALGS.get(header.get("alg"))
+    if digest is None:
+        raise JoseError(f"alg not allowed: {header.get('alg')}")
+    expected = hmac.new(secret.encode(), signing_input, digest).digest()
+    if not hmac.compare_digest(expected, signature):
         raise JoseError("invalid signature")
     return header, payload
 

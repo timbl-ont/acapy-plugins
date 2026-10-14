@@ -10,8 +10,21 @@ import org.keycloak.models.RealmModel;
  */
 final class Oid4vciPreAuthConfig {
 
-    /** Plugin redeem endpoint, e.g. http://issuer:8022/oid4vci/pre-auth/redeem (required). */
+    /**
+     * Plugin redeem endpoint on its admin API (required), e.g.
+     * http://issuer:3001/oid4vci/pre-auth/redeem or
+     * http://issuer:3001/oid4vci/tenant/{wallet_id}/pre-auth/redeem.
+     */
     static final String REDEEM_URL = "oid4vci.redeem.url";
+    /**
+     * How Keycloak authenticates to the redeem endpoint: private_key_jwt (default,
+     * realm key), client_secret_jwt or client_secret_post.
+     */
+    static final String REDEEM_CLIENT_AUTH = "oid4vci.redeem.client.auth";
+    /** Client id presented to the plugin (default: the realm issuer URL). */
+    static final String REDEEM_CLIENT_ID = "oid4vci.redeem.client.id";
+    /** Secret for the client_secret_* methods; may be a ${vault.key} reference. */
+    static final String REDEEM_CLIENT_SECRET = "oid4vci.redeem.client.secret";
     /** Credential Issuer Identifier of the plugin (required). Used as audience. */
     static final String CREDENTIAL_ISSUER = "oid4vci.credential.issuer";
     /** Require attestation-based client authentication (default true). */
@@ -19,8 +32,9 @@ final class Oid4vciPreAuthConfig {
     /** Require a DPoP proof and issue DPoP-bound tokens (default true). */
     static final String REQUIRE_DPOP = "oid4vci.require.dpop";
     /**
-     * Client used when the wallet sends no client_id. Only honoured when client
-     * attestation is not required; unset means anonymous requests are rejected.
+     * Public client used for wallets that do not present a client attestation.
+     * Only honoured when client attestation is not required; unset means such
+     * requests are rejected.
      */
     static final String ANONYMOUS_CLIENT_ID = "oid4vci.anonymous.client.id";
     /** Username of the generic, credential-less holder user (default oid4vci-holder). */
@@ -31,6 +45,9 @@ final class Oid4vciPreAuthConfig {
     static final String REDEEM_TIMEOUT_MS = "oid4vci.redeem.timeout.ms";
 
     final URI redeemUrl;
+    final String redeemClientAuth;
+    final String redeemClientId;
+    final String redeemClientSecret;
     final String credentialIssuer;
     final boolean requireClientAttestation;
     final boolean requireDpop;
@@ -42,6 +59,9 @@ final class Oid4vciPreAuthConfig {
     private Oid4vciPreAuthConfig(RealmModel realm) {
         String redeem = realm.getAttribute(REDEEM_URL);
         this.redeemUrl = redeem == null || redeem.isBlank() ? null : URI.create(redeem.trim());
+        this.redeemClientAuth = orDefault(realm.getAttribute(REDEEM_CLIENT_AUTH), "private_key_jwt");
+        this.redeemClientId = trimToNull(realm.getAttribute(REDEEM_CLIENT_ID));
+        this.redeemClientSecret = trimToNull(realm.getAttribute(REDEEM_CLIENT_SECRET));
         this.credentialIssuer = trimToNull(realm.getAttribute(CREDENTIAL_ISSUER));
         this.requireClientAttestation = bool(realm.getAttribute(REQUIRE_CLIENT_ATTESTATION), true);
         this.requireDpop = bool(realm.getAttribute(REQUIRE_DPOP), true);

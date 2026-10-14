@@ -3,9 +3,9 @@
 Keycloak (with the extension in ``oid4vc/keycloak/extension``) serves the
 pre-authorized code token request: it authenticates the wallet with
 attestation-based client authentication (ABCA), requires a DPoP proof, and
-redeems the plugin-issued code through the plugin's back-channel redeem
-endpoint. The plugin validates the resulting access tokens locally against the
-realm JWKS.
+redeems the plugin-issued code through the redeem endpoint on the plugin's
+admin API. The plugin validates the resulting access tokens locally against
+the realm JWKS.
 
 Authorization server entry settings::
 
@@ -17,22 +17,30 @@ Authorization server entry settings::
       "issuer": "...",     # optional, expected iss (default public_url)
       "audience": "...",   # optional, expected aud (default credential issuer URL)
       "refresh_id_claim": "refresh_id",   # optional
-      "require_dpop": true         # optional
+      "require_dpop": true,               # optional
+      "redeem_client": {                  # optional: redeem call authentication
+        "auth_method": "private_key_jwt", # | client_secret_jwt | client_secret_post
+        "client_id": "...",               # default: the realm issuer
+        "client_secret": "...",           # for the client_secret_* methods
+        "jwks_uri": "...",                # default: the realm JWKS
+        "audience": "..."                 # default: the redeem URL as received
+      }
     }
 """
 
 import logging
-import time
 from typing import Any, Mapping, Optional
-
-from aiohttp import web
 
 from oid4vc.auth_providers import (
     AuthContext,
     AuthServerConfigError,
     AuthServerProvider,
-    BackChannelAuthError,
     InvalidTokenError,
+)
+from oid4vc.auth_providers.client_auth import (
+    PRIVATE_KEY_JWT,
+    BackChannelClient,
+    authenticate_client,
 )
 from oid4vc.jose_util import (
     JoseError,
@@ -40,16 +48,10 @@ from oid4vc.jose_util import (
     ReplayCache,
     audience_matches,
     check_time_claims,
-    decode_jws,
 )
 from oid4vc.jwt import JWTVerifyResult
 
 LOGGER = logging.getLogger(__name__)
-
-# JWS typ of the assertion Keycloak signs for back-channel redeem requests.
-REDEEM_ASSERTION_TYP = "oid4vci-redeem+jwt"
-# Maximum lifetime accepted for a redeem assertion (seconds).
-REDEEM_ASSERTION_MAX_LIFETIME = 300
 
 
 class KeycloakProvider(AuthServerProvider):
@@ -105,8 +107,6 @@ class KeycloakProvider(AuthServerProvider):
             LOGGER.info("Keycloak access token rejected: %s", err)
             raise InvalidTokenError("Token verification failed") from err
 
-        if header.get("typ") == REDEEM_ASSERTION_TYP:
-            raise InvalidTokenError("Not an access token")
         if payload.get("iss") != self._issuer(ctx):
             raise InvalidTokenError("Token issuer mismatch")
         audience = ctx.setting("audience", ctx.issuer_url)
@@ -116,41 +116,28 @@ class KeycloakProvider(AuthServerProvider):
             raise InvalidTokenError("Token does not reference a credential exchange")
         return JWTVerifyResult(headers=header, payload=payload, verified=True)
 
+    def redeem_client(self, ctx: AuthContext) -> BackChannelClient:
+        """Expected client authentication for redeem calls from this realm."""
+        conf = ctx.setting("redeem_client", {}) or {}
+        return BackChannelClient(
+            client_id=conf.get("client_id") or self._issuer(ctx),
+            auth_method=conf.get("auth_method") or PRIVATE_KEY_JWT,
+            client_secret=conf.get("client_secret"),
+            jwks_uri=conf.get("jwks_uri") or self._jwks_uri(ctx),
+            audience=conf.get("audience"),
+        )
+
     async def authenticate_back_channel(
-        self, ctx: AuthContext, request: web.Request
+        self,
+        ctx: AuthContext,
+        params: Mapping[str, str],
+        endpoint_url: str,
     ) -> None:
-        """Verify the realm-signed assertion on a redeem request.
-
-        ``Authorization: Bearer <jwt>`` with ``typ`` = ``oid4vci-redeem+jwt``,
-        ``iss`` = realm issuer, ``aud`` = credential issuer identifier, short
-        ``exp`` and a single-use ``jti``.
-        """
-        auth = request.headers.get("Authorization", "")
-        scheme, _, assertion = auth.partition(" ")
-        if scheme.lower() != "bearer" or not assertion:
-            raise BackChannelAuthError("missing bearer assertion")
-        try:
-            header, _, _, _ = decode_jws(assertion)
-            if header.get("typ") != REDEEM_ASSERTION_TYP:
-                raise BackChannelAuthError(f"assertion typ is not {REDEEM_ASSERTION_TYP}")
-            _, payload = await self._verify_realm_jwt(ctx, assertion)
-            check_time_claims(payload, leeway=10)
-        except JoseError as err:
-            raise BackChannelAuthError(f"invalid assertion: {err}") from err
-
-        if payload.get("iss") != self._issuer(ctx):
-            raise BackChannelAuthError("assertion issuer mismatch")
-        if not audience_matches(payload.get("aud"), ctx.issuer_url):
-            raise BackChannelAuthError("assertion audience mismatch")
-        iat = payload.get("iat")
-        if (
-            not isinstance(iat, (int, float))
-            or payload["exp"] - iat > REDEEM_ASSERTION_MAX_LIFETIME
-            or iat > time.time() + 10
-        ):
-            raise BackChannelAuthError("assertion lifetime is not acceptable")
-        jti = payload.get("jti")
-        if not isinstance(jti, str) or not jti:
-            raise BackChannelAuthError("assertion has no jti")
-        if not self._redeem_jtis.check_and_add(jti, payload["exp"] + 10):
-            raise BackChannelAuthError("assertion jti replayed")
+        """Authenticate a redeem call from the realm (RFC 7523 client auth)."""
+        await authenticate_client(
+            self.redeem_client(ctx),
+            params,
+            endpoint_url,
+            jwks_cache=self._jwks,
+            replay_cache=self._redeem_jtis,
+        )

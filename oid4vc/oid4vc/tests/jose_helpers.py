@@ -96,3 +96,19 @@ def dpop_proof(
     if access_token is not None:
         payload["ath"] = access_token_hash(access_token)
     return sign({"typ": typ, "jwk": jwk or public_jwk(key)}, payload, key, "ES256")
+
+
+def sign_hmac(header: dict, payload: dict, secret: str, alg: str = "HS256") -> str:
+    import hashlib
+    import hmac
+
+    signing_input = (
+        b64url_encode(json.dumps({"alg": alg, **header}).encode())
+        + "."
+        + b64url_encode(json.dumps(payload).encode())
+    ).encode()
+    digest = {"HS256": hashlib.sha256, "HS384": hashlib.sha384, "HS512": hashlib.sha512}[
+        alg
+    ]
+    sig = hmac.new(secret.encode(), signing_input, digest).digest()
+    return signing_input.decode() + "." + b64url_encode(sig)

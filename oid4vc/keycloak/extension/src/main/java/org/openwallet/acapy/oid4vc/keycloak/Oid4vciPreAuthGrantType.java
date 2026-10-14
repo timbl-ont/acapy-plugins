@@ -94,7 +94,9 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
         // 3. Redeem the code at the plugin.
         RedeemClient.Redemption redemption;
         try {
-            redemption = RedeemClient.redeem(session, realm, config, code, txCode, client.getClientId());
+            String walletClientId = formParams.getFirst(OAuth2Constants.CLIENT_ID);
+            redemption = RedeemClient.redeem(session, realm, config, code, txCode,
+                    walletClientId != null ? walletClientId : client.getClientId());
         } catch (RedeemClient.RedeemException e) {
             event.detail(Details.REASON, e.getMessage()).error(Errors.INVALID_CODE);
             if (e.unavailable) {
@@ -157,13 +159,19 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
     }
 
     private void authenticateClient(Oid4vciPreAuthConfig config) {
-        boolean clientIdentified = formParams.getFirst(OAuth2Constants.CLIENT_ID) != null
-                || headers.getHeaderString(AttestationBasedClientAuthenticator.OAUTH_CLIENT_ATTESTATION_HEADER) != null
-                || headers.getHeaderString("Authorization") != null;
+        // A client "presents credentials" when it sends a wallet attestation or
+        // any other client authentication the realm understands. A bare
+        // client_id is not a credential.
+        boolean presentsCredentials =
+                headers.getHeaderString(AttestationBasedClientAuthenticator.OAUTH_CLIENT_ATTESTATION_HEADER) != null
+                || headers.getHeaderString("Authorization") != null
+                || formParams.getFirst(OAuth2Constants.CLIENT_ASSERTION) != null
+                || formParams.getFirst(OAuth2Constants.CLIENT_SECRET) != null;
 
-        if (clientIdentified) {
-            checkClient(); // runs the realm client flow, including the ABCA authenticator
-        } else if (!config.requireClientAttestation && config.anonymousClientId != null) {
+        if (!presentsCredentials && !config.requireClientAttestation && config.anonymousClientId != null) {
+            // No client authentication: use the public anonymous client. The
+            // wallet's own client_id (if any) is unauthenticated, so it is only
+            // passed to the plugin for logging.
             client = realm.getClientByClientId(config.anonymousClientId);
             if (client == null || !client.isEnabled() || !client.isPublicClient()) {
                 event.error(Errors.CLIENT_NOT_FOUND);
@@ -173,10 +181,9 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
             clientConfig = OIDCAdvancedConfigWrapper.fromClientModel(client);
             clientAuthAttributes = Map.of();
         } else {
-            event.error(Errors.INVALID_CLIENT);
-            throw error(OAuthErrorException.INVALID_CLIENT,
-                    config.requireClientAttestation ? "Client attestation is required" : "client_id is required",
-                    Response.Status.UNAUTHORIZED);
+            // Runs the realm client authentication flow (ABCA authenticator
+            // included); a public client authenticates with its client_id alone.
+            checkClient();
         }
 
         session.getContext().setClient(client);

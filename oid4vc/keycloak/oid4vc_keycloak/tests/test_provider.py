@@ -9,7 +9,8 @@ from oid4vc.auth_providers import AuthContext, BackChannelAuthError, InvalidToke
 from oid4vc.jose_util import JWKSCache
 from oid4vc.tests.jose_helpers import public_jwk, rsa_key, sign
 
-from oid4vc_keycloak.provider import REDEEM_ASSERTION_TYP, KeycloakProvider
+from oid4vc.auth_providers.client_auth import JWT_BEARER_ASSERTION
+from oid4vc_keycloak.provider import KeycloakProvider
 
 REALM = "https://kc.example/realms/oid4vci"
 ISSUER = "https://issuer.example"
@@ -89,14 +90,6 @@ async def test_token_signed_by_other_key(provider, ctx):
 
 
 @pytest.mark.asyncio
-async def test_redeem_assertion_is_not_an_access_token(provider, ctx, realm_key):
-    with pytest.raises(InvalidTokenError):
-        await provider.validate_access_token(
-            ctx, _token(realm_key, typ=REDEEM_ASSERTION_TYP)
-        )
-
-
-@pytest.mark.asyncio
 async def test_custom_claim_and_dpop_settings(provider, realm_key):
     ctx = AuthContext(
         SimpleNamespace(settings={}),
@@ -116,50 +109,76 @@ async def test_custom_claim_and_dpop_settings(provider, realm_key):
     assert not provider.require_dpop(ctx)
 
 
+REDEEM_URL = "http://issuer:3001/oid4vci/pre-auth/redeem"
+
+
 def _assertion(key, **claims):
     now = int(time.time())
     payload = {
         "iss": REALM,
-        "aud": ISSUER,
+        "sub": REALM,
+        "aud": REDEEM_URL,
         "iat": now,
         "exp": now + 60,
         "jti": str(uuid.uuid4()),
         **claims,
     }
-    return sign({"typ": REDEEM_ASSERTION_TYP, "kid": "realm-1"}, payload, key, "RS256")
+    return sign({"kid": "realm-1"}, payload, key, "RS256")
 
 
-def _req(assertion):
-    return SimpleNamespace(headers={"Authorization": f"Bearer {assertion}"})
+def _params(assertion):
+    return {"client_assertion_type": JWT_BEARER_ASSERTION, "client_assertion": assertion}
 
 
 @pytest.mark.asyncio
-async def test_back_channel_auth(provider, ctx, realm_key):
-    assertion = _assertion(realm_key)
-    await provider.authenticate_back_channel(ctx, _req(assertion))
+async def test_back_channel_private_key_jwt_with_realm_key(provider, ctx, realm_key):
+    # Default: private_key_jwt, client_id = realm issuer, keys = realm JWKS
+    params = _params(_assertion(realm_key))
+    await provider.authenticate_back_channel(ctx, params, REDEEM_URL)
     with pytest.raises(BackChannelAuthError, match="replayed"):
-        await provider.authenticate_back_channel(ctx, _req(assertion))
+        await provider.authenticate_back_channel(ctx, params, REDEEM_URL)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "claims",
-    [
-        {"aud": "https://other-issuer.example"},
-        {"iss": "https://evil.example"},
-        {"exp": int(time.time()) + 3600},
-        {"jti": None},
-    ],
-)
-async def test_back_channel_auth_rejected(provider, ctx, realm_key, claims):
-    assertion = _assertion(realm_key, **claims)
+async def test_back_channel_rejects_access_token(provider, ctx, realm_key):
+    # A realm access token is signed by the same key but is not a client assertion
     with pytest.raises(BackChannelAuthError):
-        await provider.authenticate_back_channel(ctx, _req(assertion))
+        await provider.authenticate_back_channel(
+            ctx, _params(_token(realm_key)), REDEEM_URL
+        )
 
 
 @pytest.mark.asyncio
-async def test_back_channel_auth_requires_assertion_typ(provider, ctx, realm_key):
+async def test_back_channel_wrong_endpoint(provider, ctx, realm_key):
+    with pytest.raises(BackChannelAuthError, match="audience"):
+        await provider.authenticate_back_channel(
+            ctx,
+            _params(_assertion(realm_key)),
+            "http://issuer:3001/oid4vci/tenant/other/pre-auth/redeem",
+        )
+
+
+@pytest.mark.asyncio
+async def test_back_channel_client_secret_post(provider, realm_key):
+    ctx = AuthContext(
+        SimpleNamespace(settings={}),
+        MagicMock(endpoint=ISSUER),
+        {
+            "type": "keycloak",
+            "public_url": REALM,
+            "redeem_client": {
+                "auth_method": "client_secret_post",
+                "client_id": "keycloak-redeem",
+                "client_secret": "a-long-shared-secret",
+            },
+        },
+    )
+    await provider.authenticate_back_channel(
+        ctx,
+        {"client_id": "keycloak-redeem", "client_secret": "a-long-shared-secret"},
+        REDEEM_URL,
+    )
     with pytest.raises(BackChannelAuthError):
-        await provider.authenticate_back_channel(ctx, _req(_token(realm_key)))
-    with pytest.raises(BackChannelAuthError):
-        await provider.authenticate_back_channel(ctx, SimpleNamespace(headers={}))
+        await provider.authenticate_back_channel(
+            ctx, _params(_assertion(realm_key)), REDEEM_URL
+        )

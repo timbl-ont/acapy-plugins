@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 from acapy_agent.core.profile import Profile
-from aiohttp import web
 
 from ..config import Config
 from ..jwt import JWTVerifyResult
@@ -122,10 +121,15 @@ class AuthServerProvider:
         return [public_url] if public_url else None
 
     async def authenticate_back_channel(
-        self, ctx: AuthContext, request: web.Request
+        self,
+        ctx: AuthContext,
+        params: Mapping[str, str],
+        endpoint_url: str,
     ) -> None:
         """Authenticate a back-channel (redeem) request from the AS.
 
+        ``params`` are the request's form parameters (which carry the client
+        credentials); ``endpoint_url`` is the URL the request was sent to.
         Raises ``BackChannelAuthError``.
         """
         raise BackChannelAuthError("back-channel requests are not supported")
