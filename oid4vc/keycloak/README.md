@@ -15,7 +15,9 @@ a Keycloak user per holder.
 |---|---|
 | [`extension/`](extension) | Keycloak extension: a custom grant type for `urn:ietf:params:oauth:grant-type:pre-authorized_code` (Java, Keycloak 26.8.0) |
 | [`oid4vc_keycloak/`](oid4vc_keycloak) | ACA-Py plugin that registers the `keycloak` authorization server provider with the OID4VC plugin |
-| [`demo/`](demo) | Docker Compose demo: Keycloak + issuer + a scripted wallet |
+| [`Dockerfile`](Dockerfile) | Keycloak image with the extension installed and the required features enabled |
+| [`e2e/`](e2e) | End-to-end test: Keycloak + issuer + a scripted wallet |
+| [`../demo`](../demo/README.md#keycloak-as-the-authorization-server) | The main UI demo can run with Keycloak as its authorization server |
 
 ## How it works
 
@@ -23,22 +25,23 @@ a Keycloak user per holder.
 sequenceDiagram
   autonumber
   participant C as Controller
-  participant P as Plugin (issuer / RS)
+  participant A as Plugin admin API
+  participant P as Plugin OID4VCI port
   participant W as Wallet
-  participant K as Keycloak + extension
-  C->>P: create exchange + offer (tx_code optional)
-  P-->>W: credential offer (opaque pre-authorized_code, tx_code object)
-  W->>P: GET issuer metadata → authorization_servers = [Keycloak realm]
-  W->>K: POST /token  grant=pre-authorized_code, code, tx_code, client_id<br/>OAuth-Client-Attestation + PoP, DPoP proof
-  K->>K: DPoP proof validated (TokenEndpoint)
-  K->>K: checkClient() → ABCA; require the DPoP proof
-  K->>P: POST /oid4vci/pre-auth/redeem {code, tx_code, client_id}<br/>Authorization: Bearer <realm-signed oid4vci-redeem+jwt>
-  P->>P: verify assertion (realm JWKS), check tx_code + attempt limit, mark code redeemed
-  P-->>K: {refresh_id, credential_configuration_ids, expires_in}
-  K-->>W: DPoP-bound access token (cnf.jkt, refresh_id, aud = issuer), no refresh token
-  W->>P: POST /nonce
-  W->>P: POST /credential  Authorization: DPoP <at>, DPoP proof
-  P->>P: validate token (realm JWKS: iss, aud, exp) + DPoP proof (htm, htu, ath, cnf.jkt)
+  participant K as Keycloak
+  C->>A: create exchange and offer
+  A-->>W: offer with pre-authorized code
+  W->>P: get issuer metadata
+  P-->>W: authorization server = Keycloak realm
+  W->>K: token request<br/>code, tx_code, attestation, DPoP proof
+  K->>K: check DPoP proof and attestation
+  K->>A: redeem code<br/>client assertion signed by the realm
+  A->>A: check assertion, tx_code, attempts
+  A-->>K: refresh_id, credential configuration
+  K-->>W: DPoP-bound access token
+  W->>P: nonce request
+  W->>P: credential request<br/>access token and DPoP proof
+  P->>P: check token and DPoP proof
   P-->>W: credential
 ```
 
@@ -53,6 +56,10 @@ Why it is split this way:
   type), which runs the ABCA authenticator. It then requires the DPoP proof
   that Keycloak has already validated. Keycloak's DPoP protocol mapper adds
   `cnf.jkt` to the token.
+- **Redemption is a trusted back channel.** Keycloak redeems the code on the
+  plugin's **admin API**, not the public OID4VCI port. It authenticates as an
+  OAuth client of the plugin (see [Redeem endpoint](#redeem-endpoint)), so it
+  never holds ACA-Py admin credentials.
 - **No per-holder users.** Every token is issued for one generic
   `oid4vci-holder` user in a *transient* session; nothing is persisted. The
   exchange is identified by the `refresh_id` claim (configurable), not `sub`.
@@ -68,6 +75,8 @@ cd oid4vc/keycloak/extension
 mvn -B package
 cp target/keycloak-oid4vci-pre-auth.jar /opt/keycloak/providers/
 ```
+
+Or build the image in [`Dockerfile`](Dockerfile) (`docker build oid4vc/keycloak`).
 
 The extension uses Keycloak's grant type SPI (`OAuth2GrantTypeSpi`), which is
 **internal** to Keycloak and may change between releases. Keep the Keycloak
@@ -88,12 +97,17 @@ this is expected.
 kc.sh build --features=client-auth-abca,dpop
 ```
 
+With `start-dev`, Keycloak re-runs the build at startup, so set the features
+(`KC_FEATURES`) in the runtime environment too.
+
 The extension logs a warning at startup if `oid4vc-vci-preauth-code` is
 enabled or `client-auth-abca` is disabled.
 
-Configure a fixed hostname (`KC_HOSTNAME`). The realm issuer appears in the
-access token `iss`, in the ABCA PoP `aud` and in the redeem assertion, so it
-must not depend on which hostname a caller used.
+The realm issuer URL appears in the access token `iss`, the ABCA PoP `aud`
+and the redeem client assertion. Either set a fixed hostname (`KC_HOSTNAME`),
+or, behind a reverse proxy, use `--proxy-headers=xforwarded` so the issuer
+follows the public host the wallet used. Wallet-facing requests must all see
+the same issuer.
 
 ### 3. Realm
 
@@ -102,11 +116,14 @@ realm can point at its own plugin tenant:
 
 | Realm attribute | Default | Meaning |
 |---|---|---|
-| `oid4vci.redeem.url` | — (required) | Plugin redeem endpoint, e.g. `http://issuer:8082/oid4vci/pre-auth/redeem` or `.../tenant/{wallet_id}/oid4vci/pre-auth/redeem`. Can be an internal URL. |
-| `oid4vci.credential.issuer` | — (required) | The plugin's Credential Issuer Identifier (`credential_issuer` in the offer). Added to the access token `aud`, and the `aud` of the redeem assertion. |
-| `oid4vci.require.client.attestation` | `true` | Require ABCA. When `false`, any client authentication the realm accepts is enough. |
+| `oid4vci.redeem.url` | — (required) | The plugin's redeem endpoint on its **admin API**: `http://issuer:3001/oid4vci/pre-auth/redeem` (single tenant) or `http://issuer:3001/oid4vci/tenant/{wallet_id}/pre-auth/redeem` |
+| `oid4vci.redeem.client.auth` | `private_key_jwt` | How Keycloak authenticates to the redeem endpoint: `private_key_jwt` (client assertion signed with the realm key), `client_secret_jwt` or `client_secret_post` |
+| `oid4vci.redeem.client.id` | the realm issuer URL | Client id presented to the plugin |
+| `oid4vci.redeem.client.secret` | unset | Secret for the `client_secret_*` methods. Can be a vault reference, e.g. `${vault.oid4vci-redeem}` |
+| `oid4vci.credential.issuer` | — (required) | The plugin's Credential Issuer Identifier (`credential_issuer` in the offer). Added to the access token `aud`. |
+| `oid4vci.require.client.attestation` | `true` | Require ABCA. When `false`, wallets that present no client authentication use the anonymous client. |
+| `oid4vci.anonymous.client.id` | unset | Public client used for wallets that present no client authentication. Honoured only when attestation is not required. |
 | `oid4vci.require.dpop` | `true` | Require a DPoP proof on the token request. |
-| `oid4vci.anonymous.client.id` | unset | Public client used when the wallet sends no `client_id`. Honoured only when attestation is not required. |
 | `oid4vci.holder.username` | `oid4vci-holder` | The generic holder user. |
 | `oid4vci.refresh.id.claim` | `refresh_id` | Access token claim that carries the plugin exchange's `refresh_id`. |
 | `oid4vci.redeem.timeout.ms` | `5000` | Timeout for the redeem call. |
@@ -126,13 +143,17 @@ Also create:
   - `dpop.bound.access.tokens: true`;
   - standard, direct and service-account flows all disabled;
   - no default client scopes, to keep the token small.
+- **Optionally, a public anonymous client** (`publicClient: true`, no flows)
+  named in `oid4vci.anonymous.client.id`, for wallets without attestation.
 
 The realm's client authentication flow must include the `attestation-based`
 authenticator. Realms created while `client-auth-abca` is enabled get it
 automatically.
 
-[`demo/realm-oid4vci.json`](demo/realm-oid4vci.json) is a complete, importable
-example.
+[`e2e/realm-oid4vci.json`](e2e/realm-oid4vci.json) is a complete, importable
+example. The main demo builds a realm per tenant through the Keycloak admin
+API (`initializeKeycloak()` in
+[`../demo/frontend/index.js`](../demo/frontend/index.js)).
 
 The access token carries:
 
@@ -183,51 +204,85 @@ or per tenant, with `PUT /oid4vci/issuer/configuration`:
 | `audience` | credential issuer URL | Expected `aud`. |
 | `refresh_id_claim` | `refresh_id` | Must match the realm's `oid4vci.refresh.id.claim`. |
 | `require_dpop` | `true` | Reject access tokens that are not DPoP-bound. |
+| `redeem_client.auth_method` | `private_key_jwt` | Must match the realm's `oid4vci.redeem.client.auth`. |
+| `redeem_client.client_id` | `issuer` | Must match the realm's `oid4vci.redeem.client.id`. |
+| `redeem_client.client_secret` | unset | For the `client_secret_*` methods. |
+| `redeem_client.jwks_uri` | `jwks_uri` | Keys for `private_key_jwt`. |
+| `redeem_client.audience` | the redeem URL as received | Expected assertion `aud`, if a proxy changes the URL. |
 
 Keep the Nonce Endpoint enabled (`enable_nonce_endpoint`, the default),
 because Keycloak does not return `c_nonce`.
 
-The redeem endpoint (`POST {issuer}/oid4vci/pre-auth/redeem`) is served on
-the public OID4VCI port, but only for tenants whose authorization server is
-Keycloak; for any other tenant it returns 404. Requests must carry a JWT
-that:
+### Redeem endpoint
 
-- has `typ` `oid4vci-redeem+jwt`;
-- is signed by the realm, with `iss` = the realm and `aud` = the credential
-  issuer;
-- lives at most 5 minutes and has a single-use `jti`.
+`POST /oid4vci/pre-auth/redeem` and
+`POST /oid4vci/tenant/{wallet_id}/pre-auth/redeem` are on the plugin's
+**admin API**. They return 404 for tenants whose authorization server is not
+Keycloak.
 
-Also restrict the endpoint at the network level so that only Keycloak can
-reach it.
+They do not take ACA-Py admin credentials (API key or tenant token).
+Instead, Keycloak is an OAuth client of the plugin, the same way the plugin is
+a client of the reference authorization server. It authenticates with RFC
+7523 / RFC 6749 client authentication in the form body:
 
-## Demo
+- **`private_key_jwt`** (default): `client_assertion_type` =
+  `urn:ietf:params:oauth:client-assertion-type:jwt-bearer` and a
+  `client_assertion` signed with the realm's key, checked against the realm
+  JWKS. No shared secret.
+- **`client_secret_jwt`**: the same assertion, HMAC-signed with a shared
+  secret.
+- **`client_secret_post`**: `client_id` + `client_secret`.
 
-[`demo/`](demo) runs Keycloak (built with the extension), an issuer agent and
-a scripted wallet on one Docker network:
+Assertions must have `iss` = `sub` = the client id, `aud` = the redeem URL,
+a lifetime of at most 5 minutes, and a single-use `jti`. Credentials go in the
+body because on the admin port in multitenant mode ACA-Py reserves the
+`Authorization` header for tenant tokens.
+
+Why not ACA-Py admin credentials: a tenant token can do everything the tenant
+can (issue credentials, create DIDs), and ACA-Py keeps only one valid token
+per tenant, so the controller and Keycloak would have to share it and any
+token refresh would break Keycloak. With client authentication, a realm can
+only redeem codes for the tenant configured for it.
+
+Keep the admin port internal as usual; only Keycloak needs to reach the
+redeem endpoint.
+
+## End-to-end test
+
+[`e2e/`](e2e) runs Keycloak (built with the extension), an issuer agent and a
+scripted wallet on one Docker network:
 
 ```bash
-cd oid4vc/keycloak/demo
+cd oid4vc/keycloak/e2e
 docker compose up --build -d keycloak issuer
 docker compose run --rm wallet
 docker compose down
 ```
 
-The wallet script ([`demo/test_wallet.py`](demo/test_wallet.py)):
+The wallet script ([`e2e/test_wallet.py`](e2e/test_wallet.py)):
 
 1. creates a credential configuration and an offer with a `tx_code`
    through the admin API;
 2. discovers Keycloak from the issuer metadata;
-3. shows that a token request **without** a wallet attestation, and one with
+3. checks that a token request **without** a wallet attestation, and one with
    a **wrong** `tx_code`, are rejected;
 4. gets a DPoP-bound token with a wallet attestation, its PoP, a DPoP proof
    and the `tx_code`;
 5. calls `/nonce` and `/credential` with the token and a DPoP proof;
-6. shows that the DPoP-bound token is rejected when sent as a `Bearer` token.
+6. checks that the DPoP-bound token is rejected when sent as a `Bearer`
+   token, that the public port has no redeem endpoint, and that the admin
+   redeem endpoint rejects calls without Keycloak's client authentication.
 
 The Keycloak admin console is at <http://localhost:8180> (`admin` / `admin`).
 
-`demo/attester-demo-key.json` is a **demo-only** wallet attester key. Its
-public half is trusted by the demo realm. Never reuse it.
+`e2e/attester-demo-key.json` is a **test-only** wallet attester key. Its
+public half is trusted by the test realm. Never reuse it.
+
+## Demo with a real wallet
+
+The main UI demo (JWT, SD-JWT and mdoc issuance) can use Keycloak instead of
+the reference authorization server. See
+[`../demo/README.md`](../demo/README.md#keycloak-as-the-authorization-server).
 
 ## Limitations and open questions
 
@@ -242,16 +297,19 @@ public half is trusted by the demo realm. Never reuse it.
   the PoP signature algorithm from the `alg` member of the attestation's
   `cnf.jwk` and does not infer it from the curve. If `alg` is missing, the
   token request fails with `invalid_client_attestation` ("Key with algorithm
-  null ..."). Wallet attesters must include it; the demo wallet does.
+  null ..."). Wallet attesters must include it; the test wallet does.
 - **Replay caches are per process.** The plugin's DPoP `jti` cache and its
-  redeem-assertion `jti` cache are held in memory. Multiple plugin instances
-  behind a load balancer need shared storage for full replay protection.
+  redeem client-assertion `jti` cache are held in memory. Multiple plugin
+  instances behind a load balancer need shared storage for full replay
+  protection.
 - **No resource-server `DPoP-Nonce`** (RFC 9449 §9) yet.
-- **Wallet behaviour.** Wallets must send `client_id` and the ABCA headers in
-  the pre-authorized code token request. A wallet that relies on anonymous
-  access (`pre-authorized_grant_anonymous_access_supported`) needs
-  `oid4vci.require.client.attestation=false` and
-  `oid4vci.anonymous.client.id`.
+- **No refresh tokens.** Credential refresh flows that rely on a refresh
+  token (such as the demo's SD-JWT refresh) do not work with Keycloak.
+- **Wallet behaviour.** With attestation required, wallets must send
+  `client_id` and the ABCA headers in the pre-authorized code token request.
+  Wallets without attestation need `oid4vci.require.client.attestation=false`
+  and `oid4vci.anonymous.client.id`; their `client_id`, if sent, is not
+  authenticated and is only logged.
 - **AS metadata.** Keycloak's discovery document does not list the custom
   grant in `grant_types_supported`. Most wallets just use the
   `token_endpoint`.

@@ -36,7 +36,7 @@ Each provider covers these parts of the flow:
 | `require_dpop` | `check_token` |
 | `authorization_servers` | issuer metadata, `openid-configuration` |
 | `serves_token_endpoint` | the plugin `/token` (only `builtin`); `token_endpoint` in the metadata |
-| `supports_redeem`, `authenticate_back_channel` | `POST /oid4vci/pre-auth/redeem` |
+| `supports_redeem`, `authenticate_back_channel` | `POST /oid4vci[/tenant/{wallet_id}]/pre-auth/redeem` (admin API) |
 
 ## Shared, provider-independent pieces
 
@@ -54,6 +54,12 @@ Each provider covers these parts of the flow:
 - **`jose_util.py`**: JWS verification against a bare JWK (RS/PS/ES/EdDSA,
   using `cryptography`; askar only supports EdDSA/ES256), RFC 7638 thumbprints,
   a JWKS cache and a replay cache.
+- **`auth_providers/client_auth.py`**: OAuth client authentication for
+  back-channel calls *from* an authorization server (`private_key_jwt`,
+  `client_secret_jwt`, `client_secret_post`). It mirrors the methods the
+  reference authorization server accepts from the plugin, in the other
+  direction. Credentials go in the form body, because on the admin port in
+  multitenant mode ACA-Py reserves `Authorization` for tenant tokens.
 - **`pre_auth.py`**: `redeem_pre_auth_code`, used by both the built-in
   `/token` and the redeem endpoint. In one transaction it checks the code is
   single use, compares the `tx_code` in constant time, and enforces a
@@ -65,9 +71,23 @@ Each provider covers these parts of the flow:
 See [`keycloak/README.md`](../keycloak/README.md). In short, a small Keycloak
 extension registers a custom grant type for
 `urn:ietf:params:oauth:grant-type:pre-authorized_code`. It runs ABCA and
-requires DPoP. It then redeems the plugin's code over an authenticated back
-channel and issues a DPoP-bound token for a generic holder user in a
-transient session. Keycloak's experimental OID4VC features are not used.
+requires DPoP. It then redeems the plugin's code and issues a DPoP-bound token
+for a generic holder user in a transient session. Keycloak's experimental
+OID4VC features are not used.
+
+Redemption is a trusted backend call, so the redeem endpoint is on the
+plugin's **admin API**, not the public OID4VCI port. Keycloak authenticates as
+an OAuth client of the plugin (default `private_key_jwt` with the realm key,
+verified against the realm JWKS), not with ACA-Py admin credentials:
+
+- a tenant token would give Keycloak everything the tenant can do;
+- ACA-Py keeps one valid token per tenant, so Keycloak and the controller
+  would share it and a token refresh would break Keycloak.
+
+In multitenant deployments the tenant comes from the path
+(`/oid4vci/tenant/{wallet_id}/pre-auth/redeem`) and the caller is checked
+against *that* tenant's Keycloak entry, so a realm can only redeem codes for
+the tenant it is configured for.
 
 ### Why the code stays opaque and is redeemed by the plugin
 

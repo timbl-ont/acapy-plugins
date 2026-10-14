@@ -285,7 +285,7 @@ entry's `type` selects it:
 |---|---|---|---|
 | `builtin` (default) | The plugin's own `/token` | Minted by the plugin | Local JWT (issuer's `did:jwk`) |
 | `reference` | `oid4vc/auth_server` | Minted by the AS (`/grants/pre-authorized-code`) | Introspection |
-| `keycloak` | Keycloak + the extension in [`keycloak/`](keycloak/README.md) (requires `--plugin oid4vc_keycloak`) | Minted by the plugin, redeemed by Keycloak over a back channel | Local, against the realm JWKS |
+| `keycloak` | Keycloak + the extension in [`keycloak/`](keycloak/README.md) (requires `--plugin oid4vc_keycloak`) | Minted by the plugin, redeemed by Keycloak on the admin API (`/oid4vci/pre-auth/redeem`) | Local, against the realm JWKS |
 
 Selection, highest priority first:
 
