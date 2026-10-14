@@ -10,7 +10,9 @@
     "oid4vci.require.client.attestation": "true",
     "oid4vci.require.dpop": "true",
     "oid4vci.holder.username": "oid4vci-holder",
-    "oid4vci.refresh.id.claim": "refresh_id"
+    "oid4vci.refresh.id.claim": "refresh_id",
+    "oid4vci.refresh.tokens": "true",
+    "oid4vci.refresh.token.lifespan": "31536000"
   },
   "users": [
     {
@@ -56,5 +58,7 @@
         "dpop.bound.access.tokens": "true"
       }
     }
-  ]
+  ],
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0
 }

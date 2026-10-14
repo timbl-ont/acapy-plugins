@@ -41,7 +41,9 @@ import org.jboss.logging.Logger;
  * grant does what the plugin should not have to: authenticate the wallet
  * (attestation-based client authentication) and bind the token to a DPoP key.
  * It then redeems the code at the plugin and issues a short-lived, DPoP-bound
- * access token for a generic holder user, carrying the exchange's refresh_id.
+ * access token for a generic holder user, carrying the exchange's refresh_id,
+ * and a long-lived refresh token ({@link Oid4vciRefreshTokenProvider}) bound to
+ * the same wallet key.
  * <p>
  * Order matters: the client and the DPoP proof are checked before the code is
  * redeemed, so an unauthenticated request cannot burn a code or a tx_code
@@ -141,8 +143,8 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
             updateUserSessionFromClientAuth(userSession);
         }
 
-        // 5./6. Short-lived access token, no refresh token. The DPoP protocol
-        // mapper binds cnf.jkt because a validated proof is in the session.
+        // 5./6. Short-lived access token. The DPoP protocol mapper binds cnf.jkt
+        // because a validated proof is in the session.
         TokenManager.AccessTokenResponseBuilder responseBuilder =
                 createTokenResponseBuilder(holder, userSession, clientSessionCtx, scope, null);
         AccessToken token = responseBuilder.getAccessToken();
@@ -153,6 +155,17 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
             long cap = (long) Time.currentTime() + redemption.expiresIn();
             if (token.getExp() == null || token.getExp() > cap) {
                 token.exp(cap);
+            }
+        }
+        // Long-lived refresh token (Oid4vciRefreshTokenProvider). A public
+        // client's refresh token must be bound to its DPoP key (RFC 9449 §5);
+        // confidential clients (e.g. attestation-based) are bound by Keycloak to
+        // their attested key.
+        if (config.refreshTokens) {
+            if (token.getConfirmation() != null || !client.isPublicClient()) {
+                responseBuilder.generateRefreshToken();
+            } else {
+                LOGGER.debugf("No refresh token for public client '%s' without a DPoP proof", client.getClientId());
             }
         }
         return createTokenResponse(responseBuilder, clientSessionCtx, false);
@@ -168,7 +181,14 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
                 || formParams.getFirst(OAuth2Constants.CLIENT_ASSERTION) != null
                 || formParams.getFirst(OAuth2Constants.CLIENT_SECRET) != null;
 
-        if (!presentsCredentials && !config.requireClientAttestation && config.anonymousClientId != null) {
+        // A client_id naming an enabled public client of this realm identifies
+        // the wallet; it will send the same client_id when refreshing.
+        String requestedClientId = formParams.getFirst(OAuth2Constants.CLIENT_ID);
+        ClientModel requested = requestedClientId == null ? null : realm.getClientByClientId(requestedClientId);
+        boolean knownPublicClient = requested != null && requested.isEnabled() && requested.isPublicClient();
+
+        if (!presentsCredentials && !knownPublicClient && !config.requireClientAttestation
+                && config.anonymousClientId != null) {
             // No client authentication: use the public anonymous client. The
             // wallet's own client_id (if any) is unauthenticated, so it is only
             // passed to the plugin for logging.

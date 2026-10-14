@@ -36,8 +36,9 @@ When a credential is refreshed it is updated and made available to the /credenti
 To retrieve the credential a refresh token is required. In the future, dPOP will also be required.
 
 You will need a mechanism to trigger the refresh in your wallet. One mechanism is to monitor the status of the credential via the credential status list. Bifold supports this option if configured to do so.
-With Keycloak as the authorization server, no refresh token is issued, so
-credential refresh is not available.
+With Keycloak as the authorization server, the wallet gets a DPoP-bound
+refresh token (one year by default), so credential refresh works the same
+way.
 
 ### Keycloak as the authorization server
 
@@ -54,7 +55,9 @@ with the OID4VCI pre-authorized code extension, and an ngrok tunnel for it
 (`ngrok.keycloak.yml`). At startup the demo app:
 
 1. creates a realm `oid4vci-<wallet id>` for its issuer tenant through the
-   Keycloak admin API, with the generic holder user and the wallet client(s);
+   Keycloak admin API, with the generic holder user, the wallet client(s),
+   refresh token rotation, and the extension's refresh client hint in the
+   client authentication flow;
 2. sets the tenant's authorization server to that realm
    (`PUT /oid4vci/issuer/configuration` with `"type": "keycloak"`).
 
@@ -74,6 +77,7 @@ Settings (in `.env`, see `.env.example`):
 | `KEYCLOAK_WALLET_CLIENT_ID` | — | Your wallet's `client_id`, registered as an attestation-based client |
 | `KEYCLOAK_ATTESTER_JWKS` / `KEYCLOAK_ATTESTER_JWKS_URL` | — | Your wallet provider's attester public keys (a one-line JWKS JSON, or a JWKS URL) |
 | `KEYCLOAK_REQUIRE_DPOP` | `true` | Require DPoP on the token request. Set `false` for wallets that don't send DPoP. |
+| `KEYCLOAK_REFRESH_TOKEN_LIFESPAN` | `31536000` (1 year) | Lifetime of the refresh tokens. They are bound to the wallet's key and rotated on each use. |
 | `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | `admin` / `admin` | Keycloak admin account |
 | `KEYCLOAK_NGROK_URL` | from ngrok | Static Keycloak URL, if you have one |
 

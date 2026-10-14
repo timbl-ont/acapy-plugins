@@ -38,7 +38,7 @@ sequenceDiagram
   K->>A: redeem code<br/>client assertion signed by the realm
   A->>A: check assertion, tx_code, attempts
   A-->>K: refresh_id, credential configuration
-  K-->>W: DPoP-bound access token
+  K-->>W: DPoP-bound access token and refresh token
   W->>P: nonce request
   W->>P: credential request<br/>access token and DPoP proof
   P->>P: check token and DPoP proof
@@ -60,9 +60,12 @@ Why it is split this way:
   plugin's **admin API**, not the public OID4VCI port. It authenticates as an
   OAuth client of the plugin (see [Redeem endpoint](#redeem-endpoint)), so it
   never holds ACA-Py admin credentials.
-- **No per-holder users.** Every token is issued for one generic
+- **No per-holder users or sessions.** Every token is issued for one generic
   `oid4vci-holder` user in a *transient* session; nothing is persisted. The
   exchange is identified by the `refresh_id` claim (configurable), not `sub`.
+- **Long-lived, key-bound refresh tokens.** The wallet also gets a refresh
+  token (default lifetime one year), bound to its key and rotated on every
+  use. See [Refresh tokens](#refresh-tokens).
 - **The code is redeemed only after client authentication and DPoP pass**, so
   an unauthenticated request cannot burn a code or use up a `tx_code` attempt.
 
@@ -127,6 +130,16 @@ realm can point at its own plugin tenant:
 | `oid4vci.holder.username` | `oid4vci-holder` | The generic holder user. |
 | `oid4vci.refresh.id.claim` | `refresh_id` | Access token claim that carries the plugin exchange's `refresh_id`. |
 | `oid4vci.redeem.timeout.ms` | `5000` | Timeout for the redeem call. |
+| `oid4vci.refresh.tokens` | `true` | Issue refresh tokens. |
+| `oid4vci.refresh.token.lifespan` | `31536000` (1 year) | Refresh token lifetime in seconds. Absolute: rotated tokens keep the first token's expiry. |
+
+Realm settings:
+
+- **Revoke refresh token** on, with **maximum reuse** `0`
+  (`revokeRefreshToken: true`, `refreshTokenMaxReuse: 0`), so refresh tokens
+  rotate.
+- **Access token lifespan** short (e.g. 300 s): this is the lifetime of
+  refreshed access tokens.
 
 Also create:
 
@@ -143,8 +156,12 @@ Also create:
   - `dpop.bound.access.tokens: true`;
   - standard, direct and service-account flows all disabled;
   - no default client scopes, to keep the token small.
-- **Optionally, a public anonymous client** (`publicClient: true`, no flows)
-  named in `oid4vci.anonymous.client.id`, for wallets without attestation.
+- **Optionally, a public anonymous client** (`publicClient: true`, no flows,
+  `dpop.bound.access.tokens: true`) named in `oid4vci.anonymous.client.id`, for
+  wallets without attestation. In that case also add the
+  **`oid4vci-refresh-client-hint`** client authenticator to the realm's client
+  authentication flow (`clients`), as ALTERNATIVE and **first** (before "Client
+  Id and Secret"). See [Refresh tokens](#refresh-tokens).
 
 The realm's client authentication flow must include the `attestation-based`
 authenticator. Realms created while `client-auth-abca` is enabled get it
@@ -164,8 +181,80 @@ The access token carries:
 - `credential_configuration_ids`;
 - `cnf.jkt`.
 
-Its lifetime is capped at the plugin's `expires_in` (300 s). No refresh token
-is issued, and the token response contains no `c_nonce`.
+Its lifetime is capped at the plugin's `expires_in` (300 s). The token
+response also contains a `refresh_token` and `refresh_expires_in`, and no
+`c_nonce`.
+
+## Refresh tokens
+
+DPoP adds little to a five-minute access token that the wallet uses once,
+seconds after it is issued. It matters for a long-lived refresh token, which
+lets the wallet get new access tokens, and so refreshed credentials, without
+a new offer.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Controller
+  participant A as Plugin admin API
+  participant P as Plugin OID4VCI port
+  participant W as Wallet
+  participant K as Keycloak
+  C->>A: credential-refresh for the exchange (same refresh_id)
+  W->>K: refresh token request<br/>refresh token, DPoP proof (and attestation)
+  K->>K: check signature, expiry, key binding and rotation
+  K-->>W: new DPoP-bound access token and rotated refresh token
+  W->>P: nonce and credential request
+  P-->>W: refreshed credential
+```
+
+How it works (`Oid4vciRefreshTokenProvider`, following the design of
+Keycloak's own OID4VCI refresh tokens):
+
+- **No sessions.** The refresh token is a self-contained JWT signed by the
+  realm. It carries the `refresh_id` and credential configuration ids. Each
+  refresh builds a throwaway transient session and copies those claims onto
+  the new access token, so nothing is stored per holder and no protocol
+  mappers are needed.
+- **Bound to the wallet's key.** Keycloak binds the refresh token itself and
+  checks the binding on every refresh:
+  - public clients (the anonymous client): the DPoP key (RFC 9449 §5). The
+    refresh request needs a DPoP proof from the same key. Without a DPoP proof
+    on the token request, a public client gets no refresh token;
+  - attestation-based clients: the attested wallet-instance key (ABCA §10.3).
+    The refresh request needs a fresh attestation PoP from the same instance.
+- **Rotation.** Each refresh returns a new refresh token, and reusing an
+  earlier one is rejected. The rotation state is a small record per token
+  family in Keycloak's single-use object store, kept for the token's lifetime.
+- **Lifetime.** `oid4vci.refresh.token.lifespan`, absolute from the first
+  token (default one year). After that the wallet needs a new offer.
+
+Refreshing a token is not the same as getting a new credential. The plugin
+issues a credential only if the controller has opened an exchange for the
+`refresh_id` (`PATCH /oid4vci/credential-refresh/{refresh_id}`); otherwise
+`/credential` returns an error, whatever the token. Credential revocation is
+handled separately, by the token status list.
+
+Revoking refresh tokens, if ever needed:
+
+- one token family: Keycloak's revocation endpoint (marks the family
+  revoked);
+- everything issued before a point in time: the realm's or client's
+  "not before" policy;
+- all refreshes: disable the holder user, or set `oid4vci.refresh.tokens` to
+  `false`.
+
+**Anonymous wallets.** A wallet that used the anonymous client never learned
+that client's id, so its refresh request has no usable `client_id`, and
+Keycloak's client authentication would reject it. The
+`oid4vci-refresh-client-hint` client authenticator recognises this
+extension's refresh tokens issued to a *public* client and supplies the
+client id from the token's `azp`. Keycloak's own "Client Id and Secret"
+authenticator then identifies the public client as usual. A wallet that sent
+a `client_id` naming a public client of the realm is given that client, and
+refreshes with the same `client_id`. A wallet that sends an unknown
+`client_id` when refreshing is rejected; register a public client with that
+id.
 
 ## Configuring the plugin
 
@@ -269,7 +358,14 @@ The wallet script ([`e2e/test_wallet.py`](e2e/test_wallet.py)):
 4. gets a DPoP-bound token with a wallet attestation, its PoP, a DPoP proof
    and the `tx_code`;
 5. calls `/nonce` and `/credential` with the token and a DPoP proof;
-6. checks that the DPoP-bound token is rejected when sent as a `Bearer`
+6. refreshes:
+   - a refresh from a different wallet instance is rejected;
+   - a refresh while no new credential is offered gives a token but no
+     credential;
+   - after the controller triggers `credential-refresh`, the rotated refresh
+     token gets a new access token and the refreshed credential;
+   - reusing a rotated refresh token is rejected;
+7. checks that the DPoP-bound token is rejected when sent as a `Bearer`
    token, that the public port has no redeem endpoint, and that the admin
    redeem endpoint rejects calls without Keycloak's client authentication.
 
@@ -298,13 +394,16 @@ the reference authorization server. See
   `cnf.jwk` and does not infer it from the curve. If `alg` is missing, the
   token request fails with `invalid_client_attestation` ("Key with algorithm
   null ..."). Wallet attesters must include it; the test wallet does.
-- **Replay caches are per process.** The plugin's DPoP `jti` cache and its
+- **Plugin replay caches are per process.** The plugin's DPoP `jti` cache and its
   redeem client-assertion `jti` cache are held in memory. Multiple plugin
   instances behind a load balancer need shared storage for full replay
   protection.
 - **No resource-server `DPoP-Nonce`** (RFC 9449 §9) yet.
-- **No refresh tokens.** Credential refresh flows that rely on a refresh
-  token (such as the demo's SD-JWT refresh) do not work with Keycloak.
+- **Refresh rotation state is in memory.** The rotation records live in
+  Keycloak's single-use object store (Infinispan), not the database. After a
+  full Keycloak cluster restart (without external Infinispan), replay
+  detection starts over: the next use of each existing refresh token is
+  accepted as its first. The tokens stay valid and bound to the wallet's key.
 - **Wallet behaviour.** With attestation required, wallets must send
   `client_id` and the ABCA headers in the pre-authorized code token request.
   Wallets without attestation need `oid4vci.require.client.attestation=false`

@@ -84,6 +84,13 @@ verified against the realm JWKS), not with ACA-Py admin credentials:
 - ACA-Py keeps one valid token per tenant, so Keycloak and the controller
   would share it and a token refresh would break Keycloak.
 
+Keycloak also issues long-lived refresh tokens (default one year) without
+storing sessions. They are self-contained, bound to the wallet's DPoP key (or
+attested instance key) and rotated on each use, following the design of
+Keycloak's own OID4VCI refresh tokens. A refreshed token only yields a
+credential if the controller has opened a new exchange for its `refresh_id`;
+credential revocation stays with the token status list.
+
 In multitenant deployments the tenant comes from the path
 (`/oid4vci/tenant/{wallet_id}/pre-auth/redeem`) and the caller is checked
 against *that* tenant's Keycloak entry, so a realm can only redeem codes for

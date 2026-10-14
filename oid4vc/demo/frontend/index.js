@@ -91,6 +91,8 @@ const KEYCLOAK_WALLET_CLIENT_ID = process.env.KEYCLOAK_WALLET_CLIENT_ID;
 const KEYCLOAK_ATTESTER_JWKS = process.env.KEYCLOAK_ATTESTER_JWKS;
 const KEYCLOAK_ATTESTER_JWKS_URL = process.env.KEYCLOAK_ATTESTER_JWKS_URL;
 const KEYCLOAK_ANONYMOUS_CLIENT_ID = "oid4vci-wallet-public";
+// Lifetime of the DPoP-bound refresh tokens Keycloak issues (seconds, default 1 year).
+const KEYCLOAK_REFRESH_TOKEN_LIFESPAN = process.env.KEYCLOAK_REFRESH_TOKEN_LIFESPAN || "31536000";
 
 //certificate and private key to import for mDL issuance
 //expires 2036, private_key is PEM base64 encoded PKCS #8.
@@ -1422,6 +1424,10 @@ async function initializeKeycloak() {
       enabled: true,
       sslRequired: "external",
       accessTokenLifespan: 300,
+      // Refresh token rotation: each refresh returns a new refresh token and the
+      // previous one stops working.
+      revokeRefreshToken: true,
+      refreshTokenMaxReuse: 0,
       attributes: {
         // The issuer's admin API, reached over the compose network.
         "oid4vci.redeem.url": `${API_BASE_URL}/oid4vci/tenant/${WALLET_ID}/pre-auth/redeem`,
@@ -1431,6 +1437,8 @@ async function initializeKeycloak() {
         "oid4vci.require.dpop": String(KEYCLOAK_REQUIRE_DPOP),
         "oid4vci.anonymous.client.id": KEYCLOAK_ANONYMOUS_CLIENT_ID,
         "oid4vci.holder.username": "oid4vci-holder",
+        "oid4vci.refresh.tokens": "true",
+        "oid4vci.refresh.token.lifespan": String(KEYCLOAK_REFRESH_TOKEN_LIFESPAN),
       },
       users: [
         {
@@ -1457,6 +1465,10 @@ async function initializeKeycloak() {
           fullScopeAllowed: false,
           defaultClientScopes: [],
           optionalClientScopes: [],
+          attributes: {
+            // Public client: its refresh tokens must be DPoP-bound (RFC 9449 §5).
+            "dpop.bound.access.tokens": String(KEYCLOAK_REQUIRE_DPOP),
+          },
         },
       ],
       identityProviders: [],
@@ -1506,6 +1518,7 @@ async function initializeKeycloak() {
         throw err;
       }
     }
+    await addRefreshClientHint(headers);
     logger.info(
       `Keycloak authorization server: ${KEYCLOAK_NGROK_URL}/realms/${KEYCLOAK_REALM} ` +
       `(wallet attestation ${KEYCLOAK_REQUIRE_ATTESTATION ? "required" : "off"}, ` +
@@ -1513,6 +1526,28 @@ async function initializeKeycloak() {
     );
   } catch (err) {
     logger.error("Keycloak initialization failed:", err?.response?.data || err.message);
+  }
+}
+
+// Wallets using the anonymous client never learn its client_id, so their
+// refresh requests carry none. The extension's "oid4vci-refresh-client-hint"
+// client authenticator identifies the client from the refresh token; it must
+// run first in the realm's client authentication flow.
+async function addRefreshClientHint(headers) {
+  const base = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/authentication`;
+  const provider = "oid4vci-refresh-client-hint";
+  let executions = (await axios.get(`${base}/flows/clients/executions`, { headers })).data;
+  let hint = executions.find((e) => e.providerId === provider);
+  if (!hint) {
+    await axios.post(`${base}/flows/clients/executions/execution`, { provider }, { headers });
+    executions = (await axios.get(`${base}/flows/clients/executions`, { headers })).data;
+    hint = executions.find((e) => e.providerId === provider);
+  }
+  if (hint.requirement !== "ALTERNATIVE") {
+    await axios.put(`${base}/flows/clients/executions`, { ...hint, requirement: "ALTERNATIVE" }, { headers });
+  }
+  for (let i = executions.indexOf(hint); i > 0; i--) {
+    await axios.post(`${base}/executions/${hint.id}/raise-priority`, {}, { headers });
   }
 }
 

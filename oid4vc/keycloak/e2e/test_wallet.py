@@ -7,7 +7,13 @@ A scripted wallet drives the whole flow against the compose stack:
 3. negative checks: token request without wallet attestation, wrong tx_code;
 4. token request to Keycloak with wallet attestation (ABCA) + DPoP;
 5. nonce + credential request to the issuer with the DPoP-bound token;
-6. negative checks: the DPoP-bound token used as a Bearer token; the redeem
+6. refresh: a refresh from a different wallet instance is rejected (the
+   refresh token is bound to the attested instance key); a refresh while
+   no new credential is offered yields a token but no credential; after the
+   controller triggers a credential refresh, the rotated refresh token gets
+   a new access token and the new credential; reusing a rotated refresh token
+   is rejected;
+7. negative checks: the DPoP-bound token used as a Bearer token; the redeem
    endpoint is absent from the public port and rejects unauthenticated calls
    on the admin port.
 
@@ -158,7 +164,7 @@ def admin(method: str, path: str, **kwargs) -> dict:
     return resp.json()
 
 
-def create_offer() -> tuple[dict, str]:
+def create_offer() -> tuple[dict, str, dict]:
     step("Issuer controller: credential configuration + offer (tx_code required)")
     did = admin("POST", "/did/jwk/create", json={"key_type": "p256"})["did"]
     admin("PUT", "/oid4vci/issuer/configuration", json={})
@@ -177,15 +183,13 @@ def create_offer() -> tuple[dict, str]:
             },
         },
     )
+    exchange_body = {
+        "supported_cred_id": supported["supported_cred_id"],
+        "credential_subject": {"name": "Tom"},
+        "verification_method": f"{did}#0",
+    }
     exchange = admin(
-        "POST",
-        "/oid4vci/exchange/create",
-        json={
-            "supported_cred_id": supported["supported_cred_id"],
-            "credential_subject": {"name": "Tom"},
-            "verification_method": f"{did}#0",
-            "pin": TX_CODE,
-        },
+        "POST", "/oid4vci/exchange/create", json={**exchange_body, "pin": TX_CODE}
     )
     offer = admin(
         "GET",
@@ -193,11 +197,15 @@ def create_offer() -> tuple[dict, str]:
         params={"exchange_id": exchange["exchange_id"]},
     )["offer"]
     print(json.dumps(offer, indent=2))
-    return offer, config_id
+    return offer, config_id, exchange_body
+
+
+def jwt_claims(token: str) -> dict:
+    return json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "==").decode())
 
 
 def main():
-    offer, config_id = create_offer()
+    offer, config_id, exchange_body = create_offer()
     code = offer["grants"][PRE_AUTH_GRANT]["pre-authorized_code"]
     issuer = offer["credential_issuer"]
 
@@ -268,33 +276,94 @@ def main():
     )
     access_token = token["access_token"]
     assert token["token_type"] == "DPoP", token["token_type"]
-    claims = json.loads(
-        base64.urlsafe_b64decode(access_token.split(".")[1] + "==").decode()
-    )
+    claims = jwt_claims(access_token)
     print("access token claims:", json.dumps(claims, indent=2))
+    refresh_token = token.get("refresh_token")
+    assert refresh_token, "no refresh token issued"
+    print(f"refresh token issued, expires in {token.get('refresh_expires_in')} s")
 
-    step("Nonce + credential request (DPoP-bound token)")
-    nonce = expect(requests.post(meta["nonce_endpoint"], timeout=10), 200, "nonce")
-    proof = sign(
-        wallet.holder_key,
-        {"typ": "openid4vci-proof+jwt", "jwk": public_jwk(wallet.holder_key)},
-        {"aud": issuer, "iat": int(time.time()), "nonce": nonce["c_nonce"]},
-    )
     cred_endpoint = meta["credential_endpoint"]
-    credential = expect(
-        requests.post(
+
+    def request_credential(at: str):
+        nonce = expect(requests.post(meta["nonce_endpoint"], timeout=10), 200, "nonce")
+        proof = sign(
+            wallet.holder_key,
+            {"typ": "openid4vci-proof+jwt", "jwk": public_jwk(wallet.holder_key)},
+            {"aud": issuer, "iat": int(time.time()), "nonce": nonce["c_nonce"]},
+        )
+        return requests.post(
             cred_endpoint,
             json={"credential_configuration_id": config_id, "proofs": {"jwt": [proof]}},
             headers={
-                "Authorization": f"DPoP {access_token}",
-                "DPoP": dpop_proof(wallet.dpop_key, "POST", cred_endpoint, access_token),
+                "Authorization": f"DPoP {at}",
+                "DPoP": dpop_proof(wallet.dpop_key, "POST", cred_endpoint, at),
             },
             timeout=30,
-        ),
-        200,
-        "credential",
+        )
+
+    def refresh(rt: str, instance: "Wallet" = wallet) -> requests.Response:
+        return requests.post(
+            token_endpoint,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": rt,
+                "client_id": CLIENT_ID,
+            },
+            headers={
+                # Attestation-based client: the attestation is presented again, and
+                # Keycloak binds the refresh token to the attested instance key.
+                # (For public clients it is bound to the DPoP key instead.)
+                **instance.attestation_headers(as_meta["issuer"]),
+                "DPoP": dpop_proof(instance.dpop_key, "POST", token_endpoint),
+            },
+            timeout=10,
+        )
+
+    step("Nonce + credential request (DPoP-bound token)")
+    credential = expect(request_credential(access_token), 200, "credential")
+    print("credential:", credential["credentials"][0]["credential"][:120], "...")
+
+    step("Negative: refresh from a different wallet instance")
+    expect(
+        refresh(refresh_token, Wallet()),
+        400,
+        "rejected (refresh token bound to the attested instance key)",
+        error="invalid_grant",
+    )
+
+    step("Refresh while no new credential is offered")
+    refreshed = expect(refresh(refresh_token), 200, "refreshed token")
+    assert refreshed["token_type"] == "DPoP", refreshed["token_type"]
+    refreshed_claims = jwt_claims(refreshed["access_token"])
+    assert refreshed_claims["refresh_id"] == claims["refresh_id"], refreshed_claims
+    assert refreshed["refresh_token"] != refresh_token, "refresh token not rotated"
+    expect(
+        request_credential(refreshed["access_token"]),
+        400,
+        "no credential: the issuer has not offered a refreshed one",
+    )
+
+    step("Issuer controller: credential refresh")
+    admin(
+        "PATCH",
+        f"/oid4vci/credential-refresh/{claims['refresh_id']}",
+        json={**exchange_body, "credential_subject": {"name": "Tom", "refreshed": True}},
+    )
+
+    step("Refresh with the rotated refresh token + new credential")
+    rotated = expect(refresh(refreshed["refresh_token"]), 200, "refreshed token")
+    credential = expect(
+        request_credential(rotated["access_token"]), 200, "new credential"
     )
     print("credential:", credential["credentials"][0]["credential"][:120], "...")
+
+    step("Negative: reuse of a rotated refresh token")
+    expect(
+        refresh(refresh_token),
+        400,
+        "rejected (rotation)",
+        error="invalid_grant",
+    )
 
     step("Negative: DPoP-bound token presented as Bearer")
     expect(

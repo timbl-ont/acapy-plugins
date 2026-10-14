@@ -41,6 +41,13 @@ final class Oid4vciPreAuthConfig {
     static final String HOLDER_USERNAME = "oid4vci.holder.username";
     /** Access token claim carrying the plugin exchange refresh_id (default refresh_id). */
     static final String REFRESH_ID_CLAIM = "oid4vci.refresh.id.claim";
+    /** Issue refresh tokens (default true). */
+    static final String REFRESH_TOKENS = "oid4vci.refresh.tokens";
+    /**
+     * Refresh token lifetime in seconds (default one year). Absolute: rotated
+     * refresh tokens keep the expiry of the first one.
+     */
+    static final String REFRESH_TOKEN_LIFESPAN = "oid4vci.refresh.token.lifespan";
     /** Timeout for the redeem call in milliseconds (default 5000). */
     static final String REDEEM_TIMEOUT_MS = "oid4vci.redeem.timeout.ms";
 
@@ -55,6 +62,8 @@ final class Oid4vciPreAuthConfig {
     final String holderUsername;
     final String refreshIdClaim;
     final int redeemTimeoutMs;
+    final boolean refreshTokens;
+    final int refreshTokenLifespan;
 
     private Oid4vciPreAuthConfig(RealmModel realm) {
         String redeem = realm.getAttribute(REDEEM_URL);
@@ -69,6 +78,8 @@ final class Oid4vciPreAuthConfig {
         this.holderUsername = orDefault(realm.getAttribute(HOLDER_USERNAME), "oid4vci-holder");
         this.refreshIdClaim = orDefault(realm.getAttribute(REFRESH_ID_CLAIM), "refresh_id");
         this.redeemTimeoutMs = intOr(realm.getAttribute(REDEEM_TIMEOUT_MS), 5000);
+        this.refreshTokens = bool(realm.getAttribute(REFRESH_TOKENS), true);
+        this.refreshTokenLifespan = intOr(realm.getAttribute(REFRESH_TOKEN_LIFESPAN), 31_536_000);
     }
 
     static Oid4vciPreAuthConfig of(RealmModel realm) {
