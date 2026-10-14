@@ -94,6 +94,8 @@ class Wallet:
         attester_key, kid = load_attester_key()
         now = int(time.time())
         # Issued by the wallet provider's attester, binding the instance key.
+        # Keycloak 26.8.0 takes the PoP verification algorithm from cnf.jwk's
+        # "alg" and has no fallback for EC keys, so it must be present.
         self.attestation = sign(
             attester_key,
             {"typ": "oauth-client-attestation+jwt", "kid": kid},
@@ -102,7 +104,7 @@ class Wallet:
                 "sub": CLIENT_ID,
                 "iat": now,
                 "exp": now + 3600,
-                "cnf": {"jwk": public_jwk(self.instance_key)},
+                "cnf": {"jwk": {**public_jwk(self.instance_key), "alg": "ES256"}},
             },
         )
 
@@ -130,12 +132,16 @@ def step(title: str):
     print(f"\n=== {title}")
 
 
-def expect(resp: requests.Response, status: int | tuple, label: str) -> dict:
+def expect(
+    resp: requests.Response, status: int | tuple, label: str, error: str | None = None
+) -> dict:
     try:
         body = resp.json()
     except ValueError:
         body = {"raw": resp.text}
     ok = resp.status_code in (status if isinstance(status, tuple) else (status,))
+    if error is not None:
+        ok = ok and isinstance(body, dict) and body.get("error") == error
     print(
         f"[{'ok' if ok else 'FAIL'}] {label}: HTTP {resp.status_code} {json.dumps(body)[:300]}"
     )
@@ -241,6 +247,7 @@ def main():
         ),
         400,
         "rejected (invalid_grant)",
+        error="invalid_grant",
     )
 
     step("Token request: wallet attestation + DPoP + tx_code")

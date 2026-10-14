@@ -19,4 +19,8 @@ RUN /opt/keycloak/bin/kc.sh build
 
 FROM quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}
 COPY --from=builder /opt/keycloak/ /opt/keycloak/
+# start-dev re-runs the build at startup from the runtime environment, so the
+# features must be set here too. Without client-auth-abca the realm import
+# fails with "Invalid identity provider id [default-trust]".
+ENV KC_FEATURES=client-auth-abca,dpop
 ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]

@@ -64,6 +64,7 @@ services:
         --wallet-key insecure
         --auto-provision
         --plugin oid4vc
+        --plugin jwt_vc_json
         --plugin oid4vc_keycloak
         --log-level INFO
     ports:
@@ -89,9 +90,12 @@ services:
     environment:
       ADMIN_URL: http://issuer:3001
       CLIENT_ID: demo-wallet
-    command: >
-      sh -c "pip install -q --root-user-action=ignore 'cryptography>=42' 'requests>=2.32'
-             && python test_wallet.py"
+    command:
+      - sh
+      - -c
+      - >-
+        pip install -q --root-user-action=ignore 'cryptography>=42' 'requests>=2.32'
+        && python test_wallet.py
     depends_on:
       issuer:
         condition: service_healthy

@@ -238,6 +238,11 @@ public half is trusted by the demo realm. Never reuse it.
   server-provided challenge (both are upstream TODOs). Until it does, ABCA
   relies on the PoP being freshly signed for this AS (`aud`); there is no
   replay protection within the attestation's lifetime.
+- **`alg` required in the attestation's `cnf.jwk`.** Keycloak 26.8.0 takes
+  the PoP signature algorithm from the `alg` member of the attestation's
+  `cnf.jwk` and does not infer it from the curve. If `alg` is missing, the
+  token request fails with `invalid_client_attestation` ("Key with algorithm
+  null ..."). Wallet attesters must include it; the demo wallet does.
 - **Replay caches are per process.** The plugin's DPoP `jti` cache and its
   redeem-assertion `jti` cache are held in memory. Multiple plugin instances
   behind a load balancer need shared storage for full replay protection.
