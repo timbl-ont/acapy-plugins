@@ -1,19 +1,14 @@
 """Token endpoint for OID4VCI."""
 
-import datetime
-import hmac
 import json
 import time
-from datetime import UTC
 from secrets import token_urlsafe
 from typing import Any, Dict
 from urllib.parse import urlparse
 
 from acapy_agent.admin.request_context import AdminRequestContext
 from acapy_agent.core.profile import Profile
-from acapy_agent.messaging.models.base import BaseModelError
 from acapy_agent.messaging.models.openapi import OpenAPISchema
-from acapy_agent.storage.error import StorageError, StorageNotFoundError
 from acapy_agent.wallet.base import WalletError
 from acapy_agent.wallet.error import WalletNotFoundError
 from acapy_agent.wallet.jwt import b64_to_dict
@@ -25,24 +20,23 @@ from marshmallow import fields, pre_load
 
 from oid4vc.did_utils import retrieve_or_create_did_jwk
 from oid4vc.jwt import (
-    JWTVerifyResult,
+    JWTVerifyResult,  # noqa: F401 — re-exported by public_routes
     jwt_sign,
-    jwt_verify,
     key_from_x5c,
     key_material_for_kid,
 )
 
-from ..app_resources import AppResources
+from ..auth_providers import (
+    AccessTokenResult,
+    InvalidTokenError,
+    resolve_auth_provider,
+)
 from ..config import Config
-from ..models.exchange import OID4VCIExchangeRecord
+from ..dpop import DPOP_HEADER, DPoPError, verify_dpop_proof
 from ..models.nonce import Nonce
 from ..pop_result import PopResult
-from ..utils import (
-    get_auth_header,
-    get_auth_server_url,
-    get_first_auth_server,
-    get_tenant_subpath,
-)
+from ..pre_auth import PreAuthCodeError, redeem_pre_auth_code
+from ..utils import public_request_url
 from .constants import (
     EXPIRES_IN,
     LOGGER,
@@ -84,90 +78,71 @@ class GetTokenSchema(OpenAPISchema):
         return mutable
 
 
+def _token_error(error: str, description: str, status: int = 400) -> web.Response:
+    return web.json_response(
+        {"error": error, "error_description": description}, status=status
+    )
+
+
 @docs(tags=["oid4vci"], summary="Get credential issuance token")
 @form_schema(GetTokenSchema())
 async def token(request: web.Request):
     """Token endpoint to exchange pre-authorized codes for access tokens.
 
+    Served only by the built-in authorization server. A ``DPoP`` proof, when
+    sent, is verified and the issued token is bound to its key (RFC 9449).
+
     OID4VCI v1.0: This step MUST NOT require DID or verification method.
     """
     context: AdminRequestContext = request["context"]
     async with context.profile.session() as session:
-        auth_server = await get_first_auth_server(session, context.profile)
-    if auth_server:
+        provider, _ = await resolve_auth_provider(session, context.profile)
+    if not provider.serves_token_endpoint:
         # The wallet should never reach this endpoint when an external auth server
         # is configured — it should obtain a token directly from the auth server's
-        # token_endpoint advertised in the AS well-known metadata.  Return an
-        # explicit error rather than silently proxying.
-        raise web.HTTPBadRequest(
-            reason="Token endpoint not available: use the authorization server"
+        # token_endpoint advertised in the AS well-known metadata.
+        return _token_error(
+            "invalid_request",
+            "Token endpoint not available: use the authorization server",
         )
     form = await request.post()
-    LOGGER.debug("Token request form: %s", dict(form))
 
     if (form.get("grant_type")) != PRE_AUTHORIZED_CODE_GRANT_TYPE:
-        return web.json_response(
-            {
-                "error": "unsupported_grant_type",
-                "error_description": "grant_type not supported",
-            },
-            status=400,
-        )
+        return _token_error("unsupported_grant_type", "grant_type not supported")
 
-    # Accept both hyphenated and underscored keys
+    config = Config.from_settings(context.settings)
+
+    # Verify DPoP before redeeming so an invalid request cannot burn the code.
+    jkt = None
+    dpop_proof = request.headers.get(DPOP_HEADER)
+    if dpop_proof:
+        try:
+            jkt = verify_dpop_proof(
+                dpop_proof, htm="POST", htu=public_request_url(config, request)
+            )
+        except DPoPError as err:
+            return _token_error("invalid_dpop_proof", err.description)
+
+    # Accept both hyphenated and underscored keys, and legacy user_pin.
     pre_authorized_code = form.get("pre-authorized_code") or form.get(
         "pre_authorized_code"
     )
-    if not pre_authorized_code or not isinstance(pre_authorized_code, str):
-        return web.json_response(
-            {
-                "error": "invalid_request",
-                "error_description": "pre-authorized_code is missing or invalid",
-            },
-            status=400,
-        )
-
-    # Accept both legacy user_pin and OID4VCI 1.0 final tx_code in token requests.
-    user_pin = form.get("tx_code") or form.get("user_pin")
+    tx_code = form.get("tx_code") or form.get("user_pin")
     try:
-        async with context.profile.session() as session:
-            record = await OID4VCIExchangeRecord.retrieve_by_code(
-                session, pre_authorized_code
-            )
-    except (StorageError, BaseModelError, StorageNotFoundError) as err:
-        return web.json_response(
-            {"error": "invalid_grant", "error_description": err.roll_up}, status=400
+        record = await redeem_pre_auth_code(
+            context.profile,
+            pre_authorized_code if isinstance(pre_authorized_code, str) else None,
+            tx_code if isinstance(tx_code, str) else None,
         )
+    except PreAuthCodeError as err:
+        return _token_error(err.error, err.description)
 
-    if record.pin is not None:
-        if user_pin is None:
-            return web.json_response(
-                {
-                    "error": "invalid_request",
-                    "error_description": "user_pin is required",
-                },
-                status=400,
-            )
-        if not hmac.compare_digest(user_pin, record.pin):
-            return web.json_response(
-                {"error": "invalid_grant", "error_description": "pin is invalid"},
-                status=400,
-            )
-
-    # Check if pre-authorized code has already been used
-    if record.token is not None:
-        return web.json_response(
-            {
-                "error": "invalid_grant",
-                "error_description": "pre-authorized code has already been used",
-            },
-            status=400,
-        )
-
-    payload = {
+    payload: Dict[str, Any] = {
         "sub": record.refresh_id,
         "exp": int(time.time()) + EXPIRES_IN,
     }
+    if jkt:
+        payload["cnf"] = {"jkt": jkt}
 
     # v1 compliance: do not require DID/verification method at token step.
     # Sign with a default did:jwk under this wallet to produce a JWT access token.
@@ -182,12 +157,8 @@ async def token(request: web.Request):
                 verification_method=vm,
             )
         except (WalletNotFoundError, WalletError, ValueError) as err:
-            return web.json_response(
-                {
-                    "error": "server_error",
-                    "error_description": f"Unable to sign access token: {str(err)}",
-                },
-                status=500,
+            return _token_error(
+                "server_error", f"Unable to sign access token: {str(err)}", 500
             )
 
         record.token = token_jwt
@@ -203,10 +174,9 @@ async def token(request: web.Request):
     #   - enable_nonce_endpoint=False: no Nonce Endpoint is published, so we
     #     fall back to the legacy flow — return c_nonce in the token response
     #     and store it on the exchange record for later comparison.
-    config = Config.from_settings(context.settings)
     response: Dict[str, Any] = {
         "access_token": record.token,
-        "token_type": "Bearer",
+        "token_type": "DPoP" if jkt else "Bearer",
         "expires_in": EXPIRES_IN,
     }
     if not config.enable_nonce_endpoint:
@@ -217,22 +187,40 @@ async def token(request: web.Request):
         response["c_nonce"] = c_nonce_value
         response["c_nonce_expires_in"] = EXPIRES_IN
 
-    return web.json_response(response)
+    return web.json_response(
+        response, headers={"Cache-Control": "no-store", "Pragma": "no-cache"}
+    )
+
+
+def _unauthorized(error: str, description: str, scheme: str = "Bearer"):
+    return web.HTTPUnauthorized(
+        text=json.dumps({"error": error, "error_description": description}),
+        headers={
+            "Content-Type": "application/json",
+            "WWW-Authenticate": f'{scheme} error="{error}"',
+        },
+    )
 
 
 async def check_token(
     context: AdminRequestContext,
     bearer: str | None = None,
-) -> JWTVerifyResult:
-    """Validate the OID4VCI token.
+    *,
+    dpop_proof: str | None = None,
+    htu: str | None = None,
+    htm: str = "POST",
+) -> AccessTokenResult:
+    """Validate an access token presented to the issuer (resource server).
 
-    Accepts both ``Bearer`` and ``DPoP`` Authorization schemes.  When
-    ``dpop_signing_alg_values_supported`` is advertised in the server
-    metadata, DPoP-capable clients (e.g. Credo 0.6.x) will present an
-    ``Authorization: DPoP <token>`` header.  We accept and verify the
-    access-token JWT in both cases; the DPoP proof itself is not
-    cryptographically validated here (full DPoP binding per RFC 9449 is
-    not yet implemented).
+    The configured authorization server provider validates the token itself.
+    DPoP (RFC 9449 §7) is then enforced here, independent of the provider:
+
+    - a token bound with ``cnf.jkt`` must use the ``DPoP`` scheme and come
+      with a valid proof (``htm``/``htu``/``ath``, key matching ``cnf.jkt``);
+    - providers that require DPoP reject unbound tokens.
+
+    Unbound tokens presented with the ``DPoP`` scheme are accepted for
+    compatibility with wallets that always use it.
     """
     if not bearer:
         raise web.HTTPUnauthorized()
@@ -240,55 +228,43 @@ async def check_token(
         scheme, cred = bearer.split(" ", 1)
     except ValueError:
         raise web.HTTPUnauthorized() from None
-    if scheme.lower() not in ("bearer", "dpop"):
+    scheme = scheme.lower()
+    if scheme not in ("bearer", "dpop"):
         raise web.HTTPUnauthorized()
-    # NOTE: When scheme is "dpop", the DPoP proof in the DPoP HTTP header is NOT
-    # verified (RFC 9449 §4.3).  We advertise dpop_signing_alg_values_supported
-    # in AS metadata (required by HAIP DPOP-5.1), so wallets such as Credo may
-    # present DPoP-bound tokens.  Accepting without proof verification is a
-    # temporary compatibility measure; full DPoP support is tracked separately.
 
-    config = Config.from_settings(context.settings)
     profile = context.profile
-
     async with profile.session() as session:
-        auth_server = await get_first_auth_server(session, profile)
+        provider, ctx = await resolve_auth_provider(session, profile)
 
-    if auth_server:
-        private_url = get_auth_server_url(auth_server)
-        subpath = get_tenant_subpath(profile, tenant_prefix="/tenant")
-        issuer_server_url = f"{config.endpoint}{subpath}"
-        introspect_endpoint = f"{private_url}/introspect"
-        auth_header = await get_auth_header(
-            profile, auth_server, issuer_server_url, introspect_endpoint
-        )
-        resp = await AppResources.get_http_client().post(
-            introspect_endpoint,
-            data={"token": cred},
-            headers={"Authorization": auth_header},
-        )
-        introspect = await resp.json()
-        if not introspect.get("active"):
-            raise web.HTTPUnauthorized(reason="invalid_token")
-        else:
-            result = JWTVerifyResult(headers={}, payload=introspect, verified=True)
-            return result
+    try:
+        result = await provider.validate_access_token(ctx, cred)
+    except InvalidTokenError as err:
+        raise _unauthorized("invalid_token", err.description) from err
 
-    result = await jwt_verify(context.profile, cred)
-    if not result.verified:
-        raise web.HTTPUnauthorized(
-            text='{"error": "invalid_token", '
-            '"error_description": "Token verification failed"}',
-            headers={"Content-Type": "application/json"},
-        )
+    cnf = result.payload.get("cnf")
+    jkt = cnf.get("jkt") if isinstance(cnf, dict) else None
+    if jkt:
+        if scheme != "dpop":
+            raise _unauthorized(
+                "invalid_token", "DPoP-bound token must use the DPoP scheme", "DPoP"
+            )
+        if htu is None:
+            htu = f"{ctx.issuer_url}/credential"
+        try:
+            verify_dpop_proof(
+                dpop_proof, htm=htm, htu=htu, access_token=cred, expected_jkt=jkt
+            )
+        except DPoPError as err:
+            raise _unauthorized(err.error, err.description, "DPoP") from err
+    elif provider.require_dpop(ctx):
+        raise _unauthorized("invalid_token", "DPoP-bound access token required", "DPoP")
 
-    if result.payload["exp"] < datetime.datetime.now(UTC).timestamp():
-        raise web.HTTPUnauthorized(
-            text='{"error": "invalid_token", "error_description": "Token expired"}',
-            headers={"Content-Type": "application/json"},
-        )
-
-    return result
+    return AccessTokenResult(
+        result.headers,
+        result.payload,
+        True,
+        exchange_key=provider.exchange_key(ctx, result.payload),
+    )
 
 
 async def handle_proof_of_posession(

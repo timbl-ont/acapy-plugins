@@ -1,5 +1,9 @@
 ## OID4VC ACA-Py Plugin Demo
 
+This demo uses the reference authorization server ([`../auth_server`](../auth_server)).
+For the same demo with Keycloak as the authorization server, see
+[`../demo-keycloak`](../demo-keycloak/README.md).
+
 This is a demo for developers to test and validate the current plugin functionality and to provide a fully working example of the functionality including w3c and ietf status lists. **Do not use for production deployments** 
 
 You will need NGROK to run this demo with a valid Authentication Token

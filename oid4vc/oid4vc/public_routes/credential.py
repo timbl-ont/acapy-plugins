@@ -18,11 +18,14 @@ from aiohttp_apispec import (
 )
 from marshmallow import fields
 
+from ..config import Config
 from ..cred_processor import CredProcessorError, CredProcessors
+from ..dpop import DPOP_HEADER
 from ..models.exchange import OID4VCIExchangeRecord
 from ..models.supported_cred import SupportedCredential
 from ..routes import CredOfferQuerySchema, CredOfferResponseSchemaVal
 from ..routes.helpers import _parse_cred_offer
+from ..utils import public_request_url
 from .token import check_token, handle_proof_of_posession
 
 LOGGER = logging.getLogger(__name__)
@@ -111,8 +114,15 @@ async def issue_cred(request: web.Request):
     """
     context: AdminRequestContext = request["context"]
     # check_token raises HTTPUnauthorized on auth failures — propagate as-is.
-    token_result = await check_token(context, request.headers.get("Authorization"))
-    refresh_id = token_result.payload["sub"]
+    token_result = await check_token(
+        context,
+        request.headers.get("Authorization"),
+        dpop_proof=request.headers.get(DPOP_HEADER),
+        htu=public_request_url(Config.from_settings(context.settings), request),
+    )
+    refresh_id = getattr(token_result, "exchange_key", None) or token_result.payload.get(
+        "sub"
+    )
     req_body = await request.json()
     LOGGER.info("request: %s", req_body)
 

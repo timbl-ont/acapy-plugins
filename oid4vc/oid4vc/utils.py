@@ -74,6 +74,15 @@ def get_tenant_subpath(profile: Profile, tenant_prefix: str = "/tenants") -> str
     return tenant_subpath
 
 
+def public_request_url(config, request) -> str:
+    """Public URL of a request to the OID4VCI server, as the client addressed it.
+
+    Built from the configured public endpoint rather than the Host header so it
+    is stable behind proxies (ngrok, ingress). Used for DPoP ``htu`` checks.
+    """
+    return f"{config.endpoint.rstrip('/')}{request.path}"
+
+
 def verkey_to_jwk(verkey: str) -> Dict:
     """Convert a base58 verkey (Ed25519) to a JWK dict."""
 
