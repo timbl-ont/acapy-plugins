@@ -38,6 +38,7 @@ from oid4vc.auth_providers import (
     InvalidTokenError,
 )
 from oid4vc.auth_providers.client_auth import (
+    CREDENTIAL_ISSUER_CLAIM,
     PRIVATE_KEY_JWT,
     BackChannelClient,
     authenticate_client,
@@ -133,11 +134,17 @@ class KeycloakProvider(AuthServerProvider):
         params: Mapping[str, str],
         endpoint_url: str,
     ) -> None:
-        """Authenticate a redeem call from the realm (RFC 7523 client auth)."""
+        """Authenticate a redeem call from the realm (RFC 7523 client auth).
+
+        The caller must also state, in its signed assertion (or, with
+        ``client_secret_post``, as a form parameter), the credential issuer
+        identifier of the tenant it acts for.
+        """
         await authenticate_client(
             self.redeem_client(ctx),
             params,
             endpoint_url,
             jwks_cache=self._jwks,
             replay_cache=self._redeem_jtis,
+            required_claims={CREDENTIAL_ISSUER_CLAIM: ctx.issuer_url},
         )

@@ -17,7 +17,7 @@ a Keycloak user per holder.
 | [`oid4vc_keycloak/`](oid4vc_keycloak) | ACA-Py plugin that registers the `keycloak` authorization server provider with the OID4VC plugin |
 | [`Dockerfile`](Dockerfile) | Keycloak image with the extension installed and the required features enabled |
 | [`e2e/`](e2e) | End-to-end test: Keycloak + issuer + a scripted wallet |
-| [`../demo`](../demo/README.md#keycloak-as-the-authorization-server) | The main UI demo can run with Keycloak as its authorization server |
+| [`../demo-keycloak`](../demo-keycloak/README.md) | The UI demo with Keycloak as its authorization server |
 
 ## How it works
 
@@ -119,11 +119,11 @@ realm can point at its own plugin tenant:
 
 | Realm attribute | Default | Meaning |
 |---|---|---|
-| `oid4vci.redeem.url` | — (required) | The plugin's redeem endpoint on its **admin API**: `http://issuer:3001/oid4vci/pre-auth/redeem` (single tenant) or `http://issuer:3001/oid4vci/tenant/{wallet_id}/pre-auth/redeem` |
+| `oid4vci.redeem.url` | — (required) | The plugin's redeem endpoint on its **admin API**, e.g. `http://issuer:3001/oid4vci/pre-auth/redeem`. The same endpoint serves every tenant. |
 | `oid4vci.redeem.client.auth` | `private_key_jwt` | How Keycloak authenticates to the redeem endpoint: `private_key_jwt` (client assertion signed with the realm key), `client_secret_jwt` or `client_secret_post` |
 | `oid4vci.redeem.client.id` | the realm issuer URL | Client id presented to the plugin |
 | `oid4vci.redeem.client.secret` | unset | Secret for the `client_secret_*` methods. Can be a vault reference, e.g. `${vault.oid4vci-redeem}` |
-| `oid4vci.credential.issuer` | — (required) | The plugin's Credential Issuer Identifier (`credential_issuer` in the offer). Added to the access token `aud`. |
+| `oid4vci.credential.issuer` | — (required) | The plugin tenant's Credential Issuer Identifier (`credential_issuer` in the offer). Added to the access token `aud`, and names the tenant in redeem requests. |
 | `oid4vci.require.client.attestation` | `true` | Require ABCA. When `false`, wallets that present no client authentication use the anonymous client. |
 | `oid4vci.anonymous.client.id` | unset | Public client used for wallets that present no client authentication. Honoured only when attestation is not required. |
 | `oid4vci.require.dpop` | `true` | Require a DPoP proof on the token request. |
@@ -160,8 +160,11 @@ Also create:
   `dpop.bound.access.tokens: true`) named in `oid4vci.anonymous.client.id`, for
   wallets without attestation. In that case also add the
   **`oid4vci-refresh-client-hint`** client authenticator to the realm's client
-  authentication flow (`clients`), as ALTERNATIVE and **first** (before "Client
-  Id and Secret"). See [Refresh tokens](#refresh-tokens).
+  authentication flow, as ALTERNATIVE and **first** (before "Client Id and
+  Secret"). The built-in `clients` flow can't be changed: duplicate it (e.g.
+  as `clients-oid4vci`), add the authenticator to the copy, and bind the copy
+  as the realm's client authentication flow. See
+  [Refresh tokens](#refresh-tokens).
 
 The realm's client authentication flow must include the `attestation-based`
 authenticator. Realms created while `client-auth-abca` is enabled get it
@@ -304,12 +307,10 @@ because Keycloak does not return `c_nonce`.
 
 ### Redeem endpoint
 
-`POST /oid4vci/pre-auth/redeem` and
-`POST /oid4vci/tenant/{wallet_id}/pre-auth/redeem` are on the plugin's
-**admin API**. They return 404 for tenants whose authorization server is not
-Keycloak.
+`POST /oid4vci/pre-auth/redeem` is on the plugin's **admin API**, and one
+endpoint serves every tenant.
 
-They do not take ACA-Py admin credentials (API key or tenant token).
+It does not take ACA-Py admin credentials (API key or tenant token).
 Instead, Keycloak is an OAuth client of the plugin, the same way the plugin is
 a client of the reference authorization server. It authenticates with RFC
 7523 / RFC 6749 client authentication in the form body:
@@ -326,6 +327,23 @@ Assertions must have `iss` = `sub` = the client id, `aud` = the redeem URL,
 a lifetime of at most 5 minutes, and a single-use `jti`. Credentials go in the
 body because on the admin port in multitenant mode ACA-Py reserves the
 `Authorization` header for tenant tokens.
+
+**Which tenant.** As elsewhere on the admin API, the tenant is carried in the
+authentication rather than the path. Keycloak names the credential issuer it
+acts for (the realm's `oid4vci.credential.issuer`) in a `credential_issuer`
+claim of its signed assertion; with `client_secret_post`, as a form parameter
+of the same name. The plugin:
+
+1. maps it to the base wallet (`{endpoint}`) or a tenant
+   (`{endpoint}/tenant/{wallet_id}`);
+2. verifies the credentials against **that tenant's** Keycloak entry;
+3. checks the verified `credential_issuer` is that tenant's.
+
+So a realm can only redeem codes for the tenant whose configuration trusts
+it, and no tenant can redirect another tenant's realm to itself: an
+assertion names its tenant under the realm's signature. Unknown issuers,
+tenants not using Keycloak, and failed authentication all return 401
+`invalid_client`.
 
 Why not ACA-Py admin credentials: a tenant token can do everything the tenant
 can (issue credentials, create DIDs), and ACA-Py keeps only one valid token
@@ -376,9 +394,9 @@ public half is trusted by the test realm. Never reuse it.
 
 ## Demo with a real wallet
 
-The main UI demo (JWT, SD-JWT and mdoc issuance) can use Keycloak instead of
-the reference authorization server. See
-[`../demo/README.md`](../demo/README.md#keycloak-as-the-authorization-server).
+[`../demo-keycloak`](../demo-keycloak/README.md) is the UI demo (JWT, SD-JWT
+and mdoc issuance) with Keycloak as the authorization server instead of the
+reference authorization server.
 
 ## Limitations and open questions
 

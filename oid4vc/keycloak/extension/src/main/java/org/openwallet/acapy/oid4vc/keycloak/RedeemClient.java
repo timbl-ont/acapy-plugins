@@ -41,6 +41,12 @@ import org.jboss.logging.Logger;
  * </ul>
  * Credentials are sent in the form body: on the ACA-Py admin port the
  * {@code Authorization} header is reserved for ACA-Py tenant tokens.
+ * <p>
+ * The plugin tenant is carried in the authentication: the request names the
+ * credential issuer it acts for ({@code oid4vci.credential.issuer}) as a
+ * {@code credential_issuer} claim of the client assertion and as a form
+ * parameter. The plugin routes on it and verifies it against that tenant's
+ * configuration.
  */
 final class RedeemClient {
 
@@ -48,6 +54,7 @@ final class RedeemClient {
     static final String PRIVATE_KEY_JWT = "private_key_jwt";
     static final String CLIENT_SECRET_JWT = "client_secret_jwt";
     static final String CLIENT_SECRET_POST = "client_secret_post";
+    static final String CREDENTIAL_ISSUER = "credential_issuer";
     private static final int ASSERTION_TTL_SECONDS = 60;
 
     private static final Logger LOGGER = Logger.getLogger(RedeemClient.class);
@@ -85,6 +92,7 @@ final class RedeemClient {
         if (walletClientId != null) {
             form.put("wallet_client_id", walletClientId);
         }
+        form.put(CREDENTIAL_ISSUER, config.credentialIssuer);
 
         HttpResponse<String> response;
         try {
@@ -167,6 +175,7 @@ final class RedeemClient {
         claims.put("iss", clientId);
         claims.put("sub", clientId);
         claims.put("aud", config.redeemUrl.toString());
+        claims.put(CREDENTIAL_ISSUER, config.credentialIssuer);
         claims.put("iat", now);
         claims.put("exp", now + ASSERTION_TTL_SECONDS);
         claims.put("jti", UUID.randomUUID().toString());

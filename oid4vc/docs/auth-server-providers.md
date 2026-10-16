@@ -91,10 +91,16 @@ Keycloak's own OID4VCI refresh tokens. A refreshed token only yields a
 credential if the controller has opened a new exchange for its `refresh_id`;
 credential revocation stays with the token status list.
 
-In multitenant deployments the tenant comes from the path
-(`/oid4vci/tenant/{wallet_id}/pre-auth/redeem`) and the caller is checked
-against *that* tenant's Keycloak entry, so a realm can only redeem codes for
-the tenant it is configured for.
+One endpoint serves every tenant. As elsewhere on the ACA-Py admin API, the
+tenant is carried in the authentication, not the path: the realm names the
+credential issuer it acts for in a `credential_issuer` claim of its signed
+client assertion. The plugin maps that to the base wallet or a tenant,
+verifies the assertion against *that* tenant's Keycloak entry, and checks the
+verified claim. A realm can only redeem codes for the tenant whose
+configuration trusts it. (The reference authorization server selects the
+tenant by URL path, `/tenants/{uid}`, but there only its operator registers
+clients; here tenants manage their own configuration, so the tenant must come
+from what the realm signs.)
 
 ### Why the code stays opaque and is redeemed by the plugin
 

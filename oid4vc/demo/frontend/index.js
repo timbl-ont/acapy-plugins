@@ -1432,7 +1432,9 @@ async function initializeKeycloak() {
       refreshTokenMaxReuse: 0,
       attributes: {
         // The issuer's admin API, reached over the compose network.
-        "oid4vci.redeem.url": `${API_BASE_URL}/oid4vci/tenant/${WALLET_ID}/pre-auth/redeem`,
+        // One endpoint for all tenants: Keycloak's signed client assertion names
+        // the tenant through oid4vci.credential.issuer.
+        "oid4vci.redeem.url": `${API_BASE_URL}/oid4vci/pre-auth/redeem`,
         "oid4vci.redeem.client.auth": "private_key_jwt",
         "oid4vci.credential.issuer": `${ISSUER_NGROK_URL}/tenant/${WALLET_ID}`,
         "oid4vci.require.client.attestation": String(KEYCLOAK_REQUIRE_ATTESTATION),

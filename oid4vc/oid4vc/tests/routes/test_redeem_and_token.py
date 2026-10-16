@@ -12,7 +12,16 @@ from oid4vc.jose_util import jwk_thumbprint
 from oid4vc.models.exchange import OID4VCIExchangeRecord
 from oid4vc.models.supported_cred import SupportedCredential
 
-from ..jose_helpers import dpop_proof, ec_key, public_jwk
+from ..jose_helpers import dpop_proof, ec_key, public_jwk, sign
+
+# Credential issuer identifier of the test profile (base wallet).
+ISSUER_ID = "http://localhost:8020"
+
+
+def _assertion(credential_issuer=ISSUER_ID):
+    """A client assertion naming the tenant; the fake provider doesn't verify it."""
+    return sign({}, {"credential_issuer": credential_issuer}, ec_key(), "ES256")
+
 
 _redeem_module = importlib.import_module("oid4vc.routes.pre_auth_redeem")
 _token_module = importlib.import_module("oid4vc.public_routes.token")
@@ -74,6 +83,7 @@ async def test_redeem_success(monkeypatch, context):
     record = await _offer(context, pin="4321")
     provider = _RedeemingProvider()
     _use_provider(monkeypatch, context, provider)
+    assertion = _assertion()
     resp = await _redeem_module.redeem_pre_auth_code_route(
         cast(
             web.Request,
@@ -83,7 +93,7 @@ async def test_redeem_success(monkeypatch, context):
                     "pre_authorized_code": "code-xyz",
                     "tx_code": "4321",
                     "wallet_client_id": "w",
-                    "client_assertion": "x",
+                    "client_assertion": assertion,
                 },
             ),
         )
@@ -94,14 +104,21 @@ async def test_redeem_success(monkeypatch, context):
     assert body["credential_configuration_ids"] == ["MyCred"]
     # Credentials and the endpoint URL are handed to the provider for auth
     params, endpoint_url = provider.seen
-    assert params["client_assertion"] == "x"
+    assert params["client_assertion"] == assertion
     assert endpoint_url == "http://issuer:3001/oid4vci/pre-auth/redeem"
 
     # Single use
     resp = await _redeem_module.redeem_pre_auth_code_route(
         cast(
             web.Request,
-            _request(context, {"pre_authorized_code": "code-xyz", "tx_code": "4321"}),
+            _request(
+                context,
+                {
+                    "pre_authorized_code": "code-xyz",
+                    "tx_code": "4321",
+                    "credential_issuer": ISSUER_ID,
+                },
+            ),
         )
     )
     assert resp.status == 400
@@ -113,7 +130,13 @@ async def test_redeem_unauthenticated(monkeypatch, context):
     await _offer(context)
     _use_provider(monkeypatch, context, _RedeemingProvider(authenticated=False))
     resp = await _redeem_module.redeem_pre_auth_code_route(
-        cast(web.Request, _request(context, {"pre_authorized_code": "code-xyz"}))
+        cast(
+            web.Request,
+            _request(
+                context,
+                {"pre_authorized_code": "code-xyz", "credential_issuer": ISSUER_ID},
+            ),
+        )
     )
     assert resp.status == 401
     # The code was not consumed
@@ -122,29 +145,46 @@ async def test_redeem_unauthenticated(monkeypatch, context):
     assert rec.code_redeemed_at is None
 
 
+async def _redeem_status(context, params) -> int:
+    resp = await _redeem_module.redeem_pre_auth_code_route(
+        cast(web.Request, _request(context, params))
+    )
+    assert json.loads(resp.body)["error"] in ("invalid_client", "invalid_grant")
+    return resp.status
+
+
 @pytest.mark.asyncio
 async def test_redeem_not_available_for_builtin(context):
-    # No authorization server configured -> built-in provider -> no redeem endpoint
-    with pytest.raises(web.HTTPNotFound):
-        await _redeem_module.redeem_pre_auth_code_route(
-            cast(web.Request, _request(context, {"pre_authorized_code": "x"}))
-        )
+    # No authorization server configured -> built-in provider -> no redeem
+    params = {"pre_authorized_code": "x", "credential_issuer": ISSUER_ID}
+    assert await _redeem_status(context, params) == 401
 
 
 @pytest.mark.asyncio
-async def test_redeem_tenant_route_without_multitenancy(context):
-    with pytest.raises(web.HTTPNotFound):
-        await _redeem_module.redeem_pre_auth_code_route(
-            cast(
-                web.Request,
-                _request(
-                    context,
-                    {"pre_authorized_code": "x"},
-                    path="/oid4vci/tenant/abc/pre-auth/redeem",
-                    match_info={"wallet_id": "abc"},
-                ),
-            )
-        )
+@pytest.mark.parametrize(
+    "params",
+    [
+        # no credential issuer named
+        {"pre_authorized_code": "x"},
+        # an issuer this agent doesn't serve
+        {"pre_authorized_code": "x", "credential_issuer": "https://other.example"},
+        # a tenant, but multitenancy is off
+        {"pre_authorized_code": "x", "credential_issuer": f"{ISSUER_ID}/tenant/abc"},
+        # undecodable assertion
+        {"pre_authorized_code": "x", "client_assertion": "not-a-jwt"},
+        # form parameter and signed claim disagree
+        {
+            "pre_authorized_code": "x",
+            "credential_issuer": ISSUER_ID,
+            "client_assertion": _assertion(f"{ISSUER_ID}/tenant/abc"),
+        },
+    ],
+)
+async def test_redeem_tenant_resolution_rejected(monkeypatch, context, params):
+    provider = _RedeemingProvider()
+    _use_provider(monkeypatch, context, provider)
+    assert await _redeem_status(context, params) == 401
+    assert not hasattr(provider, "seen")  # never reached authentication
 
 
 @pytest.mark.asyncio
@@ -197,3 +237,37 @@ async def test_builtin_token_invalid_dpop_keeps_code(monkeypatch, context):
     async with context.profile.session() as session:
         rec = await OID4VCIExchangeRecord.retrieve_by_code(session, record.code)
     assert rec.code_redeemed_at is None
+
+
+@pytest.mark.asyncio
+async def test_redeem_resolves_tenant_from_credential_issuer(context):
+    from acapy_agent.multitenant.base import BaseMultitenantManager
+    from acapy_agent.wallet.models.wallet_record import WalletRecord
+
+    tenant_profile = MagicMock()
+    manager = MagicMock(spec=BaseMultitenantManager)
+    manager.get_wallet_profile = AsyncMock(return_value=tenant_profile)
+    context.profile.context.injector.bind_instance(BaseMultitenantManager, manager)
+    async with context.profile.session() as session:
+        managed = WalletRecord(key_management_mode=WalletRecord.MODE_MANAGED, settings={})
+        await managed.save(session)
+        unmanaged = WalletRecord(
+            key_management_mode=WalletRecord.MODE_UNMANAGED, settings={}
+        )
+        await unmanaged.save(session)
+
+    profile = await _redeem_module._target_profile(
+        context, f"{ISSUER_ID}/tenant/{managed.wallet_id}"
+    )
+    assert profile is tenant_profile
+    assert manager.get_wallet_profile.call_args.args[1].wallet_id == managed.wallet_id
+
+    # Base wallet, unknown or unmanaged tenants
+    assert await _redeem_module._target_profile(context, ISSUER_ID) is context.profile
+    for issuer in (
+        f"{ISSUER_ID}/tenant/{unmanaged.wallet_id}",
+        f"{ISSUER_ID}/tenant/does-not-exist",
+        f"{ISSUER_ID}/tenant/{managed.wallet_id}/extra",
+    ):
+        with pytest.raises(_redeem_module._UnknownTenant):
+            await _redeem_module._target_profile(context, issuer)

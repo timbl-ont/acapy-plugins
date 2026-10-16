@@ -193,10 +193,6 @@ async def register(app: web.Application):
             # Back channel for external authorization servers (Keycloak);
             # authenticated by OAuth client authentication, not admin credentials.
             web.post("/oid4vci/pre-auth/redeem", redeem_pre_auth_code_route),
-            web.post(
-                "/oid4vci/tenant/{wallet_id}/pre-auth/redeem",
-                redeem_pre_auth_code_route,
-            ),
         ]
     )
 

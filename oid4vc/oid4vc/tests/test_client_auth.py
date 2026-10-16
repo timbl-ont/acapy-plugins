@@ -151,3 +151,52 @@ async def test_unsupported_method(jwks):
     client = BackChannelClient(client_id=CLIENT_ID, auth_method="client_secret_basic")
     with pytest.raises(BackChannelAuthError, match="unsupported"):
         await _auth(client, {}, jwks)
+
+
+@pytest.mark.asyncio
+async def test_required_claims_assertion(key, jwks):
+    client = BackChannelClient(client_id=CLIENT_ID, jwks_uri=JWKS_URI)
+    required = {"credential_issuer": "https://issuer.example/tenant/t1"}
+
+    async def auth(claims):
+        assertion = sign({"kid": "k1"}, _claims(**claims), key, "RS256")
+        await authenticate_client(
+            client,
+            _params(assertion),
+            ENDPOINT,
+            jwks_cache=jwks,
+            replay_cache=ReplayCache(),
+            required_claims=required,
+        )
+
+    await auth(required)
+    with pytest.raises(BackChannelAuthError, match="credential_issuer"):
+        await auth({"credential_issuer": "https://issuer.example/tenant/t2"})
+    with pytest.raises(BackChannelAuthError, match="credential_issuer"):
+        await auth({})
+
+
+@pytest.mark.asyncio
+async def test_required_claims_client_secret_post(jwks):
+    client = BackChannelClient(
+        client_id=CLIENT_ID, auth_method=CLIENT_SECRET_POST, client_secret=SECRET
+    )
+    required = {"credential_issuer": "https://issuer.example/tenant/t1"}
+    params = {"client_id": CLIENT_ID, "client_secret": SECRET}
+    await authenticate_client(
+        client,
+        {**params, **required},
+        ENDPOINT,
+        jwks_cache=jwks,
+        replay_cache=ReplayCache(),
+        required_claims=required,
+    )
+    with pytest.raises(BackChannelAuthError, match="credential_issuer"):
+        await authenticate_client(
+            client,
+            params,
+            ENDPOINT,
+            jwks_cache=jwks,
+            replay_cache=ReplayCache(),
+            required_claims=required,
+        )

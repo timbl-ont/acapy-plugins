@@ -12,8 +12,8 @@ final class Oid4vciPreAuthConfig {
 
     /**
      * Plugin redeem endpoint on its admin API (required), e.g.
-     * http://issuer:3001/oid4vci/pre-auth/redeem or
-     * http://issuer:3001/oid4vci/tenant/{wallet_id}/pre-auth/redeem.
+     * http://issuer:3001/oid4vci/pre-auth/redeem. The same endpoint serves all
+     * tenants; the tenant is the credential issuer named in the request.
      */
     static final String REDEEM_URL = "oid4vci.redeem.url";
     /**
@@ -25,7 +25,10 @@ final class Oid4vciPreAuthConfig {
     static final String REDEEM_CLIENT_ID = "oid4vci.redeem.client.id";
     /** Secret for the client_secret_* methods; may be a ${vault.key} reference. */
     static final String REDEEM_CLIENT_SECRET = "oid4vci.redeem.client.secret";
-    /** Credential Issuer Identifier of the plugin (required). Used as audience. */
+    /**
+     * Credential Issuer Identifier of the plugin tenant (required). Added to the
+     * access token audience, and names the tenant in redeem requests.
+     */
     static final String CREDENTIAL_ISSUER = "oid4vci.credential.issuer";
     /** Require attestation-based client authentication (default true). */
     static final String REQUIRE_CLIENT_ATTESTATION = "oid4vci.require.client.attestation";

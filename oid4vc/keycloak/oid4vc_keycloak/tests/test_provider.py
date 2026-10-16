@@ -118,6 +118,7 @@ def _assertion(key, **claims):
         "iss": REALM,
         "sub": REALM,
         "aud": REDEEM_URL,
+        "credential_issuer": ISSUER,
         "iat": now,
         "exp": now + 60,
         "jti": str(uuid.uuid4()),
@@ -149,12 +150,25 @@ async def test_back_channel_rejects_access_token(provider, ctx, realm_key):
 
 
 @pytest.mark.asyncio
+async def test_back_channel_must_name_this_tenant(provider, ctx, realm_key):
+    # The realm's assertion must name this tenant's credential issuer
+    for claims in (
+        {"credential_issuer": f"{ISSUER}/tenant/other"},
+        {"credential_issuer": None},
+    ):
+        with pytest.raises(BackChannelAuthError, match="credential_issuer"):
+            await provider.authenticate_back_channel(
+                ctx, _params(_assertion(realm_key, **claims)), REDEEM_URL
+            )
+
+
+@pytest.mark.asyncio
 async def test_back_channel_wrong_endpoint(provider, ctx, realm_key):
     with pytest.raises(BackChannelAuthError, match="audience"):
         await provider.authenticate_back_channel(
             ctx,
             _params(_assertion(realm_key)),
-            "http://issuer:3001/oid4vci/tenant/other/pre-auth/redeem",
+            "http://other-issuer:3001/oid4vci/pre-auth/redeem",
         )
 
 
@@ -175,7 +189,11 @@ async def test_back_channel_client_secret_post(provider, realm_key):
     )
     await provider.authenticate_back_channel(
         ctx,
-        {"client_id": "keycloak-redeem", "client_secret": "a-long-shared-secret"},
+        {
+            "client_id": "keycloak-redeem",
+            "client_secret": "a-long-shared-secret",
+            "credential_issuer": ISSUER,
+        },
         REDEEM_URL,
     )
     with pytest.raises(BackChannelAuthError):
