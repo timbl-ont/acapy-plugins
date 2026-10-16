@@ -12,7 +12,7 @@ AUTHSERVER_NGROK_URL=${AUTHSERVER_NGROK_URL:-$(tunnel_url authserver)}
 export AUTHSERVER_NGROK_URL
 echo "AUTHSERVER_NGROK_URL: $AUTHSERVER_NGROK_URL"
 
-# Issuer and Keycloak tunnels (Keycloak only with docker-compose.keycloak.yaml)
+# Issuer and Keycloak tunnels (Keycloak only in ../demo-keycloak)
 ISSUER_NGROK_URL=${ISSUER_NGROK_URL:-$(tunnel_url issuer)}
 export ISSUER_NGROK_URL
 echo "ISSUER_NGROK_URL: $ISSUER_NGROK_URL"

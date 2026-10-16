@@ -51,7 +51,6 @@ services:
         --plugin jwt_vc_json
         --plugin sd_jwt_vc
         --plugin mso_mdoc
-        --plugin oid4vc_keycloak
         --plugin status_list.v1_0
         --multitenant
         --multitenant-admin

@@ -78,7 +78,7 @@ const ADMIN_MANAGE_AUTH_TOKEN = process.env.ADMIN_MANAGE_AUTH_TOKEN;
 const TENANT_SECRET = process.env.TENANT_SECRET;
 
 // Authorization server used by the issuer tenant: "reference" (default, the
-// oid4vc/auth_server), "keycloak" (docker-compose.keycloak.yaml) or "builtin".
+// oid4vc/auth_server, ../demo), "keycloak" (../demo-keycloak) or "builtin".
 const AUTH_SERVER = (process.env.AUTH_SERVER || "reference").toLowerCase();
 const ISSUER_NGROK_URL = process.env.ISSUER_NGROK_URL;
 const KEYCLOAK_URL = process.env.KEYCLOAK_URL || "http://keycloak:8080";
@@ -707,7 +707,9 @@ async function issue_mdoc_credential(req, res) {
             name: "Sample Driving License",
             locale: "en-US",
             background_image: {
-              uri: "data:image/png;base64,iVBORw0KGgoAAAANS",
+              // Must be complete base64: wallets such as Multipaz decode data: URIs
+              // while loading the offer, and a truncated value makes that fail.
+              uri: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
               alt_text: "Driver's License Background"
             }
           }
@@ -1525,30 +1527,46 @@ async function initializeKeycloak() {
       `DPoP ${KEYCLOAK_REQUIRE_DPOP ? "required" : "optional"})`
     );
   } catch (err) {
-    logger.error("Keycloak initialization failed:", err?.response?.data || err.message);
+    const detail = err?.response?.data ? JSON.stringify(err.response.data) : err.message;
+    logger.error(`Keycloak initialization failed: ${err?.config?.method?.toUpperCase() || ""} ${err?.config?.url || ""} ${detail}`);
   }
 }
 
 // Wallets using the anonymous client never learn its client_id, so their
 // refresh requests carry none. The extension's "oid4vci-refresh-client-hint"
 // client authenticator identifies the client from the refresh token; it must
-// run first in the realm's client authentication flow.
+// run first in the realm's client authentication flow. Keycloak's built-in
+// "clients" flow can't be modified, so copy it, add the hint to the copy and
+// make the copy the realm's client authentication flow.
+const KEYCLOAK_CLIENT_AUTH_FLOW = "clients-oid4vci";
+
 async function addRefreshClientHint(headers) {
-  const base = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/authentication`;
+  const realmUrl = `${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}`;
+  const base = `${realmUrl}/authentication`;
   const provider = "oid4vci-refresh-client-hint";
-  let executions = (await axios.get(`${base}/flows/clients/executions`, { headers })).data;
+  const flow = encodeURIComponent(KEYCLOAK_CLIENT_AUTH_FLOW);
+
+  const flows = (await axios.get(`${base}/flows`, { headers })).data;
+  if (!flows.some((f) => f.alias === KEYCLOAK_CLIENT_AUTH_FLOW)) {
+    await axios.post(`${base}/flows/clients/copy`, { newName: KEYCLOAK_CLIENT_AUTH_FLOW }, { headers });
+  }
+
+  let executions = (await axios.get(`${base}/flows/${flow}/executions`, { headers })).data;
   let hint = executions.find((e) => e.providerId === provider);
   if (!hint) {
-    await axios.post(`${base}/flows/clients/executions/execution`, { provider }, { headers });
-    executions = (await axios.get(`${base}/flows/clients/executions`, { headers })).data;
+    await axios.post(`${base}/flows/${flow}/executions/execution`, { provider }, { headers });
+    executions = (await axios.get(`${base}/flows/${flow}/executions`, { headers })).data;
     hint = executions.find((e) => e.providerId === provider);
   }
   if (hint.requirement !== "ALTERNATIVE") {
-    await axios.put(`${base}/flows/clients/executions`, { ...hint, requirement: "ALTERNATIVE" }, { headers });
+    await axios.put(`${base}/flows/${flow}/executions`, { ...hint, requirement: "ALTERNATIVE" }, { headers });
   }
   for (let i = executions.indexOf(hint); i > 0; i--) {
     await axios.post(`${base}/executions/${hint.id}/raise-priority`, {}, { headers });
   }
+
+  await axios.put(realmUrl, { clientAuthenticationFlow: KEYCLOAK_CLIENT_AUTH_FLOW }, { headers });
+  logger.info(`Keycloak client authentication flow: ${KEYCLOAK_CLIENT_AUTH_FLOW} (with ${provider})`);
 }
 
 // Configure the Issuer to use the use the Auth server and define issuer metadata.
