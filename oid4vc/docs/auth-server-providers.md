@@ -169,11 +169,13 @@ sequenceDiagram
 
 Gaps found in the Keycloak source:
 
-1. **`authorization_details`:** with `oid4vc-vci` off, Keycloak has no
-   processor for type `openid_credential` and rejects it. Wallets must
-   request credentials by `scope`. Each credential configuration in the
-   plugin's metadata then needs a `scope`, and `/credential` needs to fall
-   back to the scope where it reads `authorization_details`.
+1. **`authorization_details`:** with `oid4vc-vci` off, Keycloak's own
+   `openid_credential` processor is not loaded. The extension registers one,
+   but it checks entries against what a redeemed pre-authorized code grants,
+   so it only serves that grant. For the authorization code flow it would
+   need to check entries against the plugin's credential configurations
+   instead (or wallets request credentials by `scope`, each configuration
+   then needs a `scope`, and `/credential` falls back to it).
 2. **`issuer_state`:** Keycloak stores it as the *client*-session note
    `client_request_param_issuer_state`. The built-in User Session Note mapper
    only reads *user*-session notes, so a small custom mapper is needed.

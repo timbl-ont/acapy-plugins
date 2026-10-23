@@ -22,8 +22,14 @@ to the base wallet or a tenant, then verifies the credentials against *that*
 tenant's configuration and checks the verified claim matches. A caller cannot
 act for a tenant whose configuration doesn't trust it, and no tenant can
 redirect another tenant's authorization server to itself.
+
+When the wallet's token request carried ``authorization_details`` (RFC 9396,
+OID4VCI 1.0 §5.1.1), the authorization server passes the requested credential
+configuration ids; they are checked against the offer before the code is
+redeemed, so a mismatch doesn't consume the code.
 """
 
+import json
 import logging
 
 from acapy_agent.admin.request_context import AdminRequestContext
@@ -47,7 +53,7 @@ from ..config import Config
 from ..jose_util import JoseError, unverified_claims
 from ..models.supported_cred import SupportedCredential
 from ..oauth_errors import oauth_error_response
-from ..pre_auth import PreAuthCodeError, redeem_pre_auth_code
+from ..pre_auth import PreAuthCodeError, lookup_pre_auth_code, redeem_pre_auth_code
 
 LOGGER = logging.getLogger(__name__)
 
@@ -55,9 +61,30 @@ LOGGER = logging.getLogger(__name__)
 # redeemed code. Only needs to cover the nonce + credential requests.
 REDEEMED_TOKEN_LIFETIME = 300
 
+# Form parameter: JSON array of the credential configuration ids the wallet
+# requested in authorization_details.
+REQUESTED_IDS_PARAM = "credential_configuration_ids"
+INVALID_AUTHORIZATION_DETAILS = "invalid_authorization_details"
+
 
 class _UnknownTenant(Exception):
     """The credential issuer named by the caller is not served here."""
+
+
+def _requested_configuration_ids(params: dict[str, str]) -> list[str] | None:
+    """Credential configuration ids requested in authorization_details, if any."""
+    raw = params.get(REQUESTED_IDS_PARAM)
+    if raw is None:
+        return None
+    try:
+        ids = json.loads(raw)
+    except ValueError:
+        ids = None
+    if not (isinstance(ids, list) and ids and all(isinstance(i, str) and i for i in ids)):
+        raise PreAuthCodeError(
+            "invalid_request", f"{REQUESTED_IDS_PARAM} must be a JSON array of strings"
+        )
+    return ids
 
 
 def _claimed_credential_issuer(params: dict[str, str]) -> str | None:
@@ -124,6 +151,15 @@ class PreAuthRedeemRequestSchema(OpenAPISchema):
     wallet_client_id = fields.Str(
         required=False,
         metadata={"description": "The wallet's client_id at the authorization server"},
+    )
+    credential_configuration_ids = fields.Str(
+        required=False,
+        metadata={
+            "description": "JSON array of the credential configuration ids the "
+            "wallet requested in authorization_details; checked against the offer "
+            "before the code is redeemed",
+            "example": '["org.iso.18013.5.1.mDL"]',
+        },
     )
     credential_issuer = fields.Str(
         required=False,
@@ -222,20 +258,39 @@ async def redeem_pre_auth_code_route(request: web.Request) -> web.Response:
 
     code = params.get("pre_authorized_code") or params.get("pre-authorized_code")
     try:
-        record = await redeem_pre_auth_code(profile, code, params.get("tx_code"))
+        requested_ids = _requested_configuration_ids(params)
+        # What the code grants, read before redeeming so that a request for
+        # another credential configuration doesn't consume the code.
+        offered = await lookup_pre_auth_code(profile, code)
     except PreAuthCodeError as err:
         return oauth_error_response(err.error, err.description)
-
     try:
         async with profile.session() as session:
             supported = await SupportedCredential.retrieve_by_id(
-                session, record.supported_cred_id
+                session, offered.supported_cred_id
             )
     except (StorageError, BaseModelError):
-        LOGGER.error("Supported credential for exchange %s missing", record.exchange_id)
+        LOGGER.error("Supported credential for exchange %s missing", offered.exchange_id)
         return oauth_error_response(
             "server_error", "credential configuration not found", 500
         )
+    if requested_ids and set(requested_ids) != {supported.identifier}:
+        LOGGER.info(
+            "Pre-auth redeem for exchange %s: requested %s, offer grants %s",
+            offered.exchange_id,
+            requested_ids,
+            supported.identifier,
+        )
+        return oauth_error_response(
+            INVALID_AUTHORIZATION_DETAILS,
+            "authorization_details names a credential configuration the offer "
+            "does not include",
+        )
+
+    try:
+        record = await redeem_pre_auth_code(profile, code, params.get("tx_code"))
+    except PreAuthCodeError as err:
+        return oauth_error_response(err.error, err.description)
 
     LOGGER.info(
         "Pre-authorized code for exchange %s redeemed (wallet client %s)",

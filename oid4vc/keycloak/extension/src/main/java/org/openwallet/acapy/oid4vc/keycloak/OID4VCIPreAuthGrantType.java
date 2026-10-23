@@ -1,6 +1,9 @@
 package org.openwallet.acapy.oid4vc.keycloak;
 
+import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -16,13 +19,17 @@ import org.keycloak.events.Errors;
 import org.keycloak.events.EventType;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientSessionContext;
+import org.keycloak.models.Constants;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserSessionModel;
 import org.keycloak.protocol.oidc.OIDCAdvancedConfigWrapper;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.protocol.oidc.TokenManager;
 import org.keycloak.protocol.oidc.grants.OAuth2GrantTypeBase;
+import org.keycloak.protocol.oidc.rar.AuthorizationDetailsProcessorManager;
+import org.keycloak.protocol.oidc.rar.InvalidAuthorizationDetailsException;
 import org.keycloak.representations.AccessToken;
+import org.keycloak.representations.AuthorizationDetailsJSONRepresentation;
 import org.keycloak.representations.dpop.DPoP;
 import org.keycloak.services.CorsErrorResponseException;
 import org.keycloak.services.Urls;
@@ -32,6 +39,7 @@ import org.keycloak.services.managers.UserSessionManager;
 import org.keycloak.services.util.DPoPUtil;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.sessions.RootAuthenticationSessionModel;
+import org.keycloak.util.JsonSerialization;
 
 import org.jboss.logging.Logger;
 
@@ -46,9 +54,15 @@ import org.jboss.logging.Logger;
  * and a long-lived refresh token ({@link OID4VCIPreAuthRefreshTokenProvider}) bound to
  * the same wallet key.
  * <p>
- * Order matters: the client and the DPoP proof are checked before the code is
- * redeemed, so an unauthenticated request cannot burn a code or a tx_code
- * attempt.
+ * {@code authorization_details} in the request (RFC 9396, OID4VCI 1.0 §5.1.1)
+ * go through Keycloak's RAR processing with
+ * {@link OID4VCIAuthorizationDetailsProcessor}; the response and the tokens
+ * carry them with {@code credential_identifiers} (§6.2).
+ * <p>
+ * Order matters: the client, the DPoP proof and {@code authorization_details}
+ * are checked before the code is redeemed (the plugin checks the requested
+ * credential configurations against the offer before redeeming), so an
+ * invalid request cannot burn a code or a tx_code attempt.
  */
 public class OID4VCIPreAuthGrantType extends OAuth2GrantTypeBase {
 
@@ -57,6 +71,8 @@ public class OID4VCIPreAuthGrantType extends OAuth2GrantTypeBase {
     static final String TX_CODE_PARAM = "tx_code";
     static final String CREDENTIAL_CONFIGURATION_IDS_CLAIM = "credential_configuration_ids";
     static final String AUTH_METHOD = "oid4vci-pre-authorized-code";
+    /** RFC 9396 §5 error code (Keycloak has no constant for it). */
+    static final String INVALID_AUTHORIZATION_DETAILS = "invalid_authorization_details";
 
     private static final Logger LOGGER = Logger.getLogger(OID4VCIPreAuthGrantType.class);
 
@@ -91,27 +107,33 @@ public class OID4VCIPreAuthGrantType extends OAuth2GrantTypeBase {
                     Response.Status.BAD_REQUEST);
         }
 
-        // authorization_details in the token request is ignored: the credential
-        // configuration comes from the offer the plugin created.
+        // 3. authorization_details: entries the realm can't process are
+        // rejected here; the requested credential configurations go to the
+        // plugin, which checks them against the offer before redeeming.
+        List<String> requestedConfigurationIds = requestedConfigurationIds();
 
-        // 3. Redeem the code at the plugin.
+        // 4. Redeem the code at the plugin.
         RedeemClient.Redemption redemption;
         try {
             String walletClientId = formParams.getFirst(OAuth2Constants.CLIENT_ID);
             redemption = RedeemClient.redeem(session, realm, config, code, txCode,
-                    walletClientId != null ? walletClientId : client.getClientId());
+                    walletClientId != null ? walletClientId : client.getClientId(), requestedConfigurationIds);
         } catch (RedeemClient.RedeemException e) {
-            event.detail(Details.REASON, e.getMessage()).error(Errors.INVALID_CODE);
+            boolean details = INVALID_AUTHORIZATION_DETAILS.equals(e.error);
+            event.detail(Details.REASON, e.getMessage())
+                    .error(details ? INVALID_AUTHORIZATION_DETAILS : Errors.INVALID_CODE);
             if (e.unavailable) {
                 throw error(OAuthErrorException.TEMPORARILY_UNAVAILABLE, "Credential issuer unavailable",
                         Response.Status.SERVICE_UNAVAILABLE);
             }
-            throw error(e.error, OAuthErrorException.INVALID_REQUEST.equals(e.error)
-                    ? "Invalid token request" : "Invalid pre-authorized code or tx_code",
-                    Response.Status.BAD_REQUEST);
+            String description = details
+                    ? "authorization_details names a credential configuration the offer does not include"
+                    : OAuthErrorException.INVALID_REQUEST.equals(e.error)
+                            ? "Invalid token request" : "Invalid pre-authorized code or tx_code";
+            throw error(e.error, description, Response.Status.BAD_REQUEST);
         }
 
-        // 4. Generic holder user and a transient session: Keycloak does not know the holder.
+        // 5. Generic holder user and a transient session: Keycloak does not know the holder.
         UserModel holder = session.users().getUserByUsername(realm, config.holderUsername);
         if (holder == null || !holder.isEnabled()) {
             LOGGER.errorf("Realm '%s' has no enabled holder user '%s'", realm.getName(), config.holderUsername);
@@ -144,7 +166,17 @@ public class OID4VCIPreAuthGrantType extends OAuth2GrantTypeBase {
             updateUserSessionFromClientAuth(userSession);
         }
 
-        // 5./6. Short-lived access token. The DPoP protocol mapper binds cnf.jkt
+        // authorization_details for the response (OID4VCI §6.2): each entry
+        // with credential_identifiers for the configurations the code grants.
+        List<AuthorizationDetailsJSONRepresentation> authorizationDetails = null;
+        if (requestedConfigurationIds != null) {
+            clientSessionCtx.setAttribute(OID4VCIAuthorizationDetailsProcessor.GRANTED_CONFIGURATION_IDS,
+                    redemption.credentialConfigurationIds());
+            authorizationDetails = processAuthorizationDetails(userSession, clientSessionCtx);
+            clientSessionCtx.setAttribute(Constants.AUTHORIZATION_DETAILS_RESPONSE, authorizationDetails);
+        }
+
+        // 6./7. Short-lived access token. The DPoP protocol mapper binds cnf.jkt
         // because a validated proof is in the session.
         TokenManager.AccessTokenResponseBuilder responseBuilder =
                 createTokenResponseBuilder(holder, userSession, clientSessionCtx, scope, null);
@@ -152,6 +184,10 @@ public class OID4VCIPreAuthGrantType extends OAuth2GrantTypeBase {
         token.setOtherClaims(config.refreshIdClaim, redemption.refreshId());
         token.setOtherClaims(CREDENTIAL_CONFIGURATION_IDS_CLAIM, redemption.credentialConfigurationIds());
         token.addAudience(config.credentialIssuer);
+        if (authorizationDetails != null) {
+            // Also copied into the refresh token, and from it into refreshed tokens.
+            token.setAuthorizationDetails(authorizationDetails);
+        }
         if (redemption.expiresIn() != null && redemption.expiresIn() > 0) {
             long cap = (long) Time.currentTime() + redemption.expiresIn();
             if (token.getExp() == null || token.getExp() > cap) {
@@ -170,6 +206,32 @@ public class OID4VCIPreAuthGrantType extends OAuth2GrantTypeBase {
             }
         }
         return createTokenResponse(responseBuilder, clientSessionCtx, false);
+    }
+
+    /**
+     * The credential configuration ids requested in {@code authorization_details},
+     * or null without it. Entries are validated by Keycloak's RAR processing
+     * (an unknown type, or an {@code openid_credential} entry without a
+     * configuration id or for another issuer, is rejected).
+     */
+    private List<String> requestedConfigurationIds() {
+        String raw = formParams.getFirst(OAuth2Constants.AUTHORIZATION_DETAILS);
+        if (raw == null) {
+            return null;
+        }
+        String reason;
+        try {
+            new AuthorizationDetailsProcessorManager(session).validateAuthorizationDetail(raw);
+            OID4VCIAuthorizationDetail[] details = JsonSerialization.readValue(raw, OID4VCIAuthorizationDetail[].class);
+            return Arrays.stream(details).map(OID4VCIAuthorizationDetail::getCredentialConfigurationId)
+                    .distinct().toList();
+        } catch (InvalidAuthorizationDetailsException e) {
+            reason = e.getMessage();
+        } catch (IOException | RuntimeException e) {
+            reason = "authorization_details is not a valid JSON array";
+        }
+        event.detail(Details.REASON, reason).error(INVALID_AUTHORIZATION_DETAILS);
+        throw error(INVALID_AUTHORIZATION_DETAILS, reason, Response.Status.BAD_REQUEST);
     }
 
     private void authenticateClient(OID4VCIPreAuthConfig config) {

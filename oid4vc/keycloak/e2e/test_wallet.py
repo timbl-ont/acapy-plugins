@@ -4,9 +4,13 @@ A scripted wallet drives the whole flow against the compose stack:
 
 1. issuer controller creates a credential configuration and an offer with a tx_code;
 2. wallet discovers the authorization server from the issuer metadata;
-3. negative checks: token request without wallet attestation, wrong tx_code;
-4. token request to Keycloak with wallet attestation (ABCA) + DPoP;
-5. nonce + credential request to the issuer with the DPoP-bound token;
+3. negative checks: token request without wallet attestation, wrong tx_code,
+   authorization_details for a credential configuration the offer doesn't
+   include (rejected without consuming the code);
+4. token request to Keycloak with wallet attestation (ABCA) + DPoP +
+   authorization_details; the response returns them with credential_identifiers;
+5. nonce + credential request to the issuer (by credential_identifier) with the
+   DPoP-bound token;
 6. refresh: a refresh from a different wallet instance is rejected (the
    refresh token is bound to the attested instance key); a refresh while
    no new credential is offered yields a token but no credential; after the
@@ -289,11 +293,26 @@ def main():
     print(f"authorization server: {auth_server}\ntoken endpoint: {token_endpoint}")
 
     wallet = Wallet()
+
+    def authorization_details(configuration_id: str) -> str:
+        # OID4VCI 1.0 §5.1.1: locations = the credential issuer when the
+        # authorization server is separate.
+        return json.dumps(
+            [
+                {
+                    "type": "openid_credential",
+                    "credential_configuration_id": configuration_id,
+                    "locations": [issuer],
+                }
+            ]
+        )
+
     form = {
         "grant_type": PRE_AUTH_GRANT,
         "pre-authorized_code": code,
         "tx_code": TX_CODE,
         "client_id": CLIENT_ID,
+        "authorization_details": authorization_details(config_id),
     }
 
     step("Negative: token request without wallet attestation")
@@ -324,7 +343,26 @@ def main():
         error="invalid_grant",
     )
 
-    step(f"Token request: wallet attestation{' + DPoP' if DPOP else ''} + tx_code")
+    step("Negative: authorization_details for a configuration not in the offer")
+    expect(
+        requests.post(
+            token_endpoint,
+            data={**form, "authorization_details": authorization_details("Other")},
+            headers={
+                **wallet.attestation_headers(as_meta["issuer"]),
+                **dpop_headers(wallet.dpop_key, "POST", token_endpoint),
+            },
+            timeout=10,
+        ),
+        400,
+        "rejected (code not consumed)",
+        error="invalid_authorization_details",
+    )
+
+    step(
+        f"Token request: wallet attestation{' + DPoP' if DPOP else ''}"
+        " + tx_code + authorization_details"
+    )
     token = expect(
         requests.post(
             token_endpoint,
@@ -340,7 +378,12 @@ def main():
     )
     access_token = token["access_token"]
     assert token["token_type"] == TOKEN_TYPE, token["token_type"]
+    # OID4VCI §6.2: authorization_details with credential_identifiers
+    granted = token.get("authorization_details")
+    assert granted and granted[0]["credential_identifiers"] == [config_id], granted
+    credential_identifier = granted[0]["credential_identifiers"][0]
     claims = jwt_claims(access_token)
+    assert claims["authorization_details"] == granted, claims
     print("access token claims:", json.dumps(claims, indent=2))
     refresh_token = token.get("refresh_token")
     assert refresh_token, "no refresh token issued"
@@ -357,7 +400,10 @@ def main():
         )
         return requests.post(
             cred_endpoint,
-            json={"credential_configuration_id": config_id, "proofs": {"jwt": [proof]}},
+            json={
+                "credential_identifier": credential_identifier,
+                "proofs": {"jwt": [proof]},
+            },
             headers={
                 "Authorization": f"{TOKEN_TYPE} {at}",
                 **dpop_headers(wallet.dpop_key, "POST", cred_endpoint, at),
@@ -400,6 +446,7 @@ def main():
     assert refreshed["token_type"] == TOKEN_TYPE, refreshed["token_type"]
     refreshed_claims = jwt_claims(refreshed["access_token"])
     assert refreshed_claims["refresh_id"] == claims["refresh_id"], refreshed_claims
+    assert refreshed_claims["authorization_details"] == granted, refreshed_claims
     assert refreshed["refresh_token"] != refresh_token, "refresh token not rotated"
     expect(
         request_credential(refreshed["access_token"]),

@@ -88,13 +88,14 @@ and may change between releases. Keep the Keycloak version pinned
 upgrade (see [Integration tests](#integration-tests)). Keycloak logs a warning
 at startup that the SPI is internal; this is expected.
 
-The extension registers three providers:
+The extension registers four providers:
 
 | Class | SPI | Provider id |
 |---|---|---|
 | `OID4VCIPreAuthGrantTypeFactory` | grant type | `urn:ietf:params:oauth:grant-type:pre-authorized_code` |
 | `OID4VCIPreAuthRefreshTokenProviderFactory` | refresh token | `acapy-oid4vci-pre-auth` |
 | `OID4VCIRefreshClientHintAuthenticator` | client authenticator | `oid4vci-refresh-client-hint` |
+| `OID4VCIAuthorizationDetailsProcessorFactory` | authorization details (RFC 9396) | `openid_credential` |
 
 ### 2. Server features
 
@@ -103,7 +104,7 @@ The extension registers three providers:
 | `dpop` | on (Keycloak default) | DPoP proof validation and `cnf.jkt` binding |
 | `client-auth-abca` | **on** (experimental) | Wallet attestation. Required by default; see `oid4vci.require.client.attestation` |
 | `oid4vc-vci-preauth-code` | **off** | Registers a grant type with the same id as this extension |
-| `oid4vc-vci` | off | Not used |
+| `oid4vc-vci` | **off** | Registers an `openid_credential` authorization details processor with the same id as this extension's |
 
 ```bash
 kc.sh build --features=client-auth-abca,dpop
@@ -112,8 +113,8 @@ kc.sh build --features=client-auth-abca,dpop
 With `start-dev`, Keycloak re-runs the build at startup, so set the features
 (`KC_FEATURES`) in the runtime environment too.
 
-The extension logs a warning at startup if `oid4vc-vci-preauth-code` is
-enabled or `client-auth-abca` is disabled.
+The extension logs a warning at startup if `oid4vc-vci-preauth-code` or
+`oid4vc-vci` is enabled, or `client-auth-abca` is disabled.
 
 The realm issuer URL appears in the access token `iss`, the ABCA PoP `aud`
 and the redeem client assertion. Either set a fixed hostname (`KC_HOSTNAME`),
@@ -200,11 +201,34 @@ The access token carries:
 - `sub`: the generic holder user;
 - `refresh_id`;
 - `credential_configuration_ids`;
-- `cnf.jkt`.
+- `cnf.jkt`;
+- `authorization_details`, when the token request had them.
 
 Its lifetime is capped at the plugin's `expires_in` (300 s). The token
 response also contains a `refresh_token` and `refresh_expires_in`, and no
 `c_nonce`.
+
+**`authorization_details`** (RFC 9396, OID4VCI 1.0 §5.1.1 and §6.2). A
+wallet can name the credential configuration in the token request:
+
+```json
+[{"type": "openid_credential", "credential_configuration_id": "org.iso.18013.5.1.mDL",
+  "locations": ["https://issuer.example/tenant/<wallet_id>"]}]
+```
+
+- Keycloak's RAR processing checks each entry with the extension's
+  `openid_credential` processor: it needs a `credential_configuration_id`,
+  and `locations`, if present, must include `oid4vci.credential.issuer`.
+  Other types are rejected.
+- Keycloak sends the requested ids to the plugin, which checks them against
+  the offer **before** redeeming the code. A request for another
+  configuration fails with `invalid_authorization_details`, and the code
+  stays usable.
+- The token response and the access token carry the entries with
+  `credential_identifiers` (the configuration id, one credential per
+  exchange), which the wallet can send as `credential_identifier`. Refreshed
+  tokens keep them.
+- Without `authorization_details` in the request, the response has none.
 
 ## Refresh tokens
 
@@ -376,6 +400,12 @@ tenants not using Keycloak, and failed authentication all return 401
 metadata: the plugin finds the tenant, and checks the access token `aud`,
 by that URL.
 
+**Requested credential configurations.** With `authorization_details` in the
+wallet's token request, Keycloak adds `credential_configuration_ids`, a JSON
+array of the requested ids. The plugin checks them against the offer before
+redeeming, and answers `invalid_authorization_details` (400) on a mismatch
+without consuming the code.
+
 Why not ACA-Py admin credentials: a tenant token can do everything the tenant
 can (issue credentials, create DIDs), and ACA-Py keeps only one valid token
 per tenant, so the controller and Keycloak would have to share it and any
@@ -394,6 +424,10 @@ covers the anonymous (no attestation) path:
 - the DPoP requirement;
 - the redeem call and its client assertion;
 - access token claims and binding;
+- `authorization_details`: response and token claims with
+  `credential_identifiers`, kept on refresh; invalid entries rejected before
+  redeeming; another configuration rejected by the plugin;
+- an invalid `oid4vci.redeem.url` reported as not configured;
 - refresh claims, key binding and rotation;
 - the refresh client hint.
 
@@ -429,11 +463,14 @@ The wallet script ([`e2e/test_wallet.py`](e2e/test_wallet.py)):
 1. creates a credential configuration and an offer with a `tx_code`
    through the admin API;
 2. discovers Keycloak from the issuer metadata;
-3. checks that a token request **without** a wallet attestation, and one with
-   a **wrong** `tx_code`, are rejected;
-4. gets a DPoP-bound token with a wallet attestation, its PoP, a DPoP proof
-   and the `tx_code`;
-5. calls `/nonce` and `/credential` with the token and a DPoP proof;
+3. checks that a token request **without** a wallet attestation, one with a
+   **wrong** `tx_code`, and one with `authorization_details` for a
+   configuration the offer doesn't include, are rejected;
+4. gets a DPoP-bound token with a wallet attestation, its PoP, a DPoP proof,
+   the `tx_code` and `authorization_details`, and checks the returned
+   `credential_identifiers`;
+5. calls `/nonce` and `/credential` (by `credential_identifier`) with the
+   token and a DPoP proof;
 6. refreshes:
    - a refresh from a different wallet instance is rejected;
    - a refresh while no new credential is offered gives a token but no
@@ -497,7 +534,9 @@ reference authorization server.
 - **AS metadata.** Keycloak's discovery document does not list the custom
   grant in `grant_types_supported`. Most wallets just use the
   `token_endpoint`.
-- **`authorization_details`** sent in the token request is ignored. The
-  credential configuration comes from the offer.
+- **Credential refresh under another configuration.** Tokens issued with
+  `authorization_details` name the original credential configuration, so if
+  the controller refreshes a credential under a different configuration, the
+  plugin refuses those tokens and the wallet needs a new offer.
 - **Authorization code flow** (e.g. with an upstream IdP such as Okta) is not
   covered by this extension. See [the design notes](../docs/auth-server-providers.md#future-authorization-code-flow).

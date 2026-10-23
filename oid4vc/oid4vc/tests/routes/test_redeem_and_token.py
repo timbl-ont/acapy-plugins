@@ -126,6 +126,51 @@ async def test_redeem_success(monkeypatch, context):
     assert json.loads(resp.body)["error"] == "invalid_grant"
 
 
+async def _redeem(context, **params):
+    return await _redeem_module.redeem_pre_auth_code_route(
+        cast(
+            web.Request,
+            _request(
+                context,
+                {
+                    "pre_authorized_code": "code-xyz",
+                    "client_assertion": _assertion(),
+                    **params,
+                },
+            ),
+        )
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "requested, error",
+    [
+        ('["Other"]', "invalid_authorization_details"),
+        ('["MyCred", "Other"]', "invalid_authorization_details"),
+        ("not json", "invalid_request"),
+        ("[]", "invalid_request"),
+        ('"MyCred"', "invalid_request"),
+    ],
+)
+async def test_redeem_rejects_other_configurations_without_consuming_the_code(
+    monkeypatch, context, requested, error
+):
+    await _offer(context)
+    _use_provider(monkeypatch, context, _RedeemingProvider())
+    resp = await _redeem(context, credential_configuration_ids=requested)
+    assert resp.status == 400
+    assert json.loads(resp.body)["error"] == error
+    async with context.profile.session() as session:
+        rec = await OID4VCIExchangeRecord.retrieve_by_code(session, "code-xyz")
+    assert rec.code_redeemed_at is None
+
+    # The code still works for the configuration the offer grants.
+    resp = await _redeem(context, credential_configuration_ids='["MyCred"]')
+    assert resp.status == 200
+    assert json.loads(resp.body)["credential_configuration_ids"] == ["MyCred"]
+
+
 @pytest.mark.asyncio
 async def test_redeem_unauthenticated(monkeypatch, context):
     await _offer(context)

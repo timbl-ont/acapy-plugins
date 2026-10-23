@@ -54,6 +54,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -62,8 +63,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * endpoint, served by the test framework's HTTP server.
  * <p>
  * Covers the anonymous (attestation off) path: DPoP requirement, redemption and
- * its client assertion, access token claims and binding, refresh tokens
- * (claims carried over, key binding, rotation) and the refresh client hint.
+ * its client assertion, access token claims and binding, authorization_details,
+ * refresh tokens (claims carried over, key binding, rotation) and the refresh
+ * client hint.
  * Attestation-based client authentication is covered by the end-to-end test in
  * {@code oid4vc/keycloak/e2e}.
  */
@@ -77,6 +79,7 @@ public class OID4VCIPreAuthGrantTypeTest {
     static final String REDEEM_URL = "http://127.0.0.1:8500" + REDEEM_PATH;
     static final String REFRESH_ID = "refresh-" + UUID.randomUUID();
     static final String PRE_AUTH_GRANT = "urn:ietf:params:oauth:grant-type:pre-authorized_code";
+    static final String OFFERED_CONFIGURATION = "MyCred";
 
     @InjectHttpServer
     HttpServer httpServer;
@@ -129,13 +132,20 @@ public class OID4VCIPreAuthGrantTypeTest {
         Map<String, String> form = parseForm(new String(exchange.getRequestBody().readAllBytes(),
                 StandardCharsets.UTF_8));
         redeemCalls.add(form);
-        Object body = redeemStatus == 200
-                ? Map.of("refresh_id", REFRESH_ID, "credential_configuration_ids", List.of("MyCred"),
-                        "expires_in", 300)
-                : Map.of("error", "invalid_grant", "error_description", "tx_code is invalid");
+        // Like the plugin: requested configurations must be the offered one.
+        String requested = form.get(RedeemClient.CREDENTIAL_CONFIGURATION_IDS);
+        boolean otherConfiguration = requested != null
+                && !List.of(OFFERED_CONFIGURATION).equals(JsonSerialization.readValue(requested, List.class));
+        int status = otherConfiguration ? 400 : redeemStatus;
+        Object body = otherConfiguration
+                ? Map.of("error", "invalid_authorization_details", "error_description", "not offered")
+                : status == 200
+                        ? Map.of("refresh_id", REFRESH_ID, "credential_configuration_ids", List.of(OFFERED_CONFIGURATION),
+                                "expires_in", 300)
+                        : Map.of("error", "invalid_grant", "error_description", "tx_code is invalid");
         byte[] bytes = JsonSerialization.writeValueAsBytes(body);
         exchange.getResponseHeaders().add("Content-Type", "application/json");
-        exchange.sendResponseHeaders(redeemStatus, bytes.length);
+        exchange.sendResponseHeaders(status, bytes.length);
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(bytes);
         }
@@ -169,6 +179,61 @@ public class OID4VCIPreAuthGrantTypeTest {
         assertEquals(List.of("MyCred"), access.get("credential_configuration_ids"));
         assertAudience(access, CREDENTIAL_ISSUER);
         assertEquals(wallet.thumbprint(), ((Map<?, ?>) access.get("cnf")).get("jkt"));
+
+        // No authorization_details in the request: none in the response (OID4VCI §6.2)
+        assertNull(token.get("authorization_details"));
+        assertNull(access.get("authorization_details"));
+        assertNull(redeem.get(RedeemClient.CREDENTIAL_CONFIGURATION_IDS));
+    }
+
+    @Test
+    public void authorizationDetailsAreReturnedWithCredentialIdentifiers() throws Exception {
+        Wallet wallet = new Wallet();
+        String requested = "[{\"type\":\"openid_credential\",\"credential_configuration_id\":\""
+                + OFFERED_CONFIGURATION + "\",\"locations\":[\"" + CREDENTIAL_ISSUER + "\"]}]";
+        HttpResponse<String> response = tokenRequest(wallet, true, requested);
+        assertEquals(200, response.statusCode(), response.body());
+        Map<?, ?> token = json(response.body());
+
+        // The plugin was asked to check the requested configuration before redeeming
+        assertEquals("[\"" + OFFERED_CONFIGURATION + "\"]",
+                redeemCalls.get(0).get(RedeemClient.CREDENTIAL_CONFIGURATION_IDS));
+
+        // Response and access token: the entry with credential_identifiers (OID4VCI §6.2)
+        assertGrantedDetails(token.get("authorization_details"));
+        assertGrantedDetails(claims((String) token.get("access_token")).get("authorization_details"));
+
+        // Kept on refresh
+        HttpResponse<String> refreshed = refreshRequest(wallet, (String) token.get("refresh_token"), ANONYMOUS_CLIENT);
+        assertEquals(200, refreshed.statusCode(), refreshed.body());
+        Map<?, ?> refreshedToken = json(refreshed.body());
+        assertGrantedDetails(refreshedToken.get("authorization_details"));
+        assertGrantedDetails(claims((String) refreshedToken.get("access_token")).get("authorization_details"));
+    }
+
+    @Test
+    public void authorizationDetailsForAnotherConfigurationAreRejectedByThePlugin() throws Exception {
+        String requested = "[{\"type\":\"openid_credential\",\"credential_configuration_id\":\"Other\"}]";
+        HttpResponse<String> response = tokenRequest(new Wallet(), true, requested);
+        assertEquals(400, response.statusCode(), response.body());
+        assertEquals("invalid_authorization_details", json(response.body()).get("error"));
+        assertEquals("[\"Other\"]", redeemCalls.get(0).get(RedeemClient.CREDENTIAL_CONFIGURATION_IDS));
+    }
+
+    @Test
+    public void invalidAuthorizationDetailsAreRejectedBeforeRedeeming() throws Exception {
+        for (String requested : List.of(
+                "[{\"type\":\"payment_initiation\"}]",
+                "[{\"type\":\"openid_credential\"}]",
+                "[{\"type\":\"openid_credential\",\"credential_configuration_id\":\"" + OFFERED_CONFIGURATION
+                        + "\",\"locations\":[\"https://other-issuer.example\"]}]",
+                "[]",
+                "not json")) {
+            HttpResponse<String> response = tokenRequest(new Wallet(), true, requested);
+            assertEquals(400, response.statusCode(), requested + ": " + response.body());
+            assertEquals("invalid_authorization_details", json(response.body()).get("error"), requested);
+        }
+        assertTrue(redeemCalls.isEmpty(), "nothing is redeemed");
     }
 
     @Test
@@ -276,11 +341,28 @@ public class OID4VCIPreAuthGrantTypeTest {
     }
 
     private HttpResponse<String> tokenRequest(Wallet wallet, boolean withDpop) throws Exception {
+        return tokenRequest(wallet, withDpop, null);
+    }
+
+    private HttpResponse<String> tokenRequest(Wallet wallet, boolean withDpop, String authorizationDetails)
+            throws Exception {
         Map<String, String> form = new LinkedHashMap<>();
         form.put("grant_type", PRE_AUTH_GRANT);
         form.put("pre-authorized_code", "code-1");
         form.put("tx_code", "1234");
+        if (authorizationDetails != null) {
+            form.put("authorization_details", authorizationDetails);
+        }
         return post(form, withDpop ? wallet.dpopProof(tokenEndpoint()) : null);
+    }
+
+    private static void assertGrantedDetails(Object details) {
+        assertTrue(details instanceof List<?> list && list.size() == 1, "authorization_details " + details);
+        Map<?, ?> entry = (Map<?, ?>) ((List<?>) details).get(0);
+        assertEquals("openid_credential", entry.get("type"));
+        assertEquals(OFFERED_CONFIGURATION, entry.get("credential_configuration_id"));
+        assertEquals(List.of(OFFERED_CONFIGURATION), entry.get("credential_identifiers"));
+        assertEquals(List.of(CREDENTIAL_ISSUER), entry.get("locations"));
     }
 
     private HttpResponse<String> refreshRequest(Wallet wallet, String refreshToken, String clientId)

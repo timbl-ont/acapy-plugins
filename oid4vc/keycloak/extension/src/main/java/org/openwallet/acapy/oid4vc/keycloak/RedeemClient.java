@@ -56,6 +56,8 @@ final class RedeemClient {
     static final String CLIENT_SECRET_JWT = "client_secret_jwt";
     static final String CLIENT_SECRET_POST = "client_secret_post";
     static final String CREDENTIAL_ISSUER = "credential_issuer";
+    /** Form parameter: JSON array of the requested credential configuration ids. */
+    static final String CREDENTIAL_CONFIGURATION_IDS = "credential_configuration_ids";
     private static final int ASSERTION_TTL_SECONDS = 60;
 
     private static final Logger LOGGER = Logger.getLogger(RedeemClient.class);
@@ -79,8 +81,14 @@ final class RedeemClient {
     private RedeemClient() {
     }
 
+    /**
+     * @param requestedConfigurationIds credential configuration ids the wallet
+     *        requested in authorization_details (null without); the plugin
+     *        rejects a mismatch with the offer before redeeming the code
+     */
     static Redemption redeem(KeycloakSession session, RealmModel realm, OID4VCIPreAuthConfig config,
-                             String code, String txCode, String walletClientId) throws RedeemException {
+                             String code, String txCode, String walletClientId,
+                             List<String> requestedConfigurationIds) throws RedeemException {
         Map<String, String> form = new LinkedHashMap<>();
         form.put("pre_authorized_code", code);
         if (txCode != null) {
@@ -94,6 +102,9 @@ final class RedeemClient {
         int status;
         String body;
         try {
+            if (requestedConfigurationIds != null) {
+                form.put(CREDENTIAL_CONFIGURATION_IDS, JsonSerialization.writeValueAsString(requestedConfigurationIds));
+            }
             addClientAuthentication(session, realm, config, form);
             RequestConfig requestConfig = RequestConfig.custom()
                     .setConnectTimeout(config.redeemTimeoutMs)
@@ -136,7 +147,8 @@ final class RedeemClient {
         if (status == 400) {
             Object error = json.get("error");
             String code400 = OAuthErrorException.INVALID_REQUEST.equals(error)
-                    ? OAuthErrorException.INVALID_REQUEST : OAuthErrorException.INVALID_GRANT;
+                    || OID4VCIPreAuthGrantType.INVALID_AUTHORIZATION_DETAILS.equals(error)
+                    ? (String) error : OAuthErrorException.INVALID_GRANT;
             throw new RedeemException(code400, String.valueOf(json.get("error_description")), false);
         }
         if (status == 401) {
