@@ -67,10 +67,10 @@ import org.jboss.logging.Logger;
  * The refresh token SPI is internal to Keycloak: re-check this class against
  * those upstream classes on every Keycloak upgrade.
  */
-public class Oid4vciRefreshTokenProvider extends AbstractRefreshTokenProvider {
+public class OID4VCIPreAuthRefreshTokenProvider extends AbstractRefreshTokenProvider {
 
     /** Client session context attribute marking requests handled by this provider. */
-    static final String MARKER = Oid4vciRefreshTokenProvider.class.getName();
+    static final String MARKER = OID4VCIPreAuthRefreshTokenProvider.class.getName();
     private static final String CLAIMS_ATTR = MARKER + ".claims";
     private static final String EXPIRY_ATTR = MARKER + ".exp";
     private static final String ROTATION_KEY_PREFIX = MARKER.toLowerCase() + ".rotation.";
@@ -81,18 +81,18 @@ public class Oid4vciRefreshTokenProvider extends AbstractRefreshTokenProvider {
     private static final String NOTE_REVOKED = "revoked";
     private static final int CLOCK_SKEW_SECONDS = 10;
 
-    private static final Logger LOGGER = Logger.getLogger(Oid4vciRefreshTokenProvider.class);
+    private static final Logger LOGGER = Logger.getLogger(OID4VCIPreAuthRefreshTokenProvider.class);
 
     private String pendingRotationKey;
     private Map<String, String> pendingRotationRecord;
 
-    public Oid4vciRefreshTokenProvider(KeycloakSession session) {
+    public OID4VCIPreAuthRefreshTokenProvider(KeycloakSession session) {
         super(session);
     }
 
     @Override
     public String getProviderId() {
-        return Oid4vciRefreshTokenProviderFactory.PROVIDER_ID;
+        return OID4VCIPreAuthRefreshTokenProviderFactory.PROVIDER_ID;
     }
 
     // --- Initial issuance and rotation -------------------------------------------------------------------------
@@ -101,7 +101,7 @@ public class Oid4vciRefreshTokenProvider extends AbstractRefreshTokenProvider {
     public boolean supports(InitialRefreshTokenContext ctx) {
         ClientSessionContext clientSessionCtx = ctx.clientSessionCtx();
         String grantType = clientSessionCtx.getAttribute(Constants.GRANT_TYPE, String.class);
-        return Oid4vciPreAuthGrantType.GRANT_TYPE.equals(grantType)
+        return OID4VCIPreAuthGrantType.GRANT_TYPE.equals(grantType)
                 || Boolean.TRUE.equals(clientSessionCtx.getAttribute(MARKER, Boolean.class));
     }
 
@@ -122,7 +122,7 @@ public class Oid4vciRefreshTokenProvider extends AbstractRefreshTokenProvider {
 
         Long expiry = clientSessionCtx.getAttribute(EXPIRY_ATTR, Long.class);
         if (expiry == null) {
-            Oid4vciPreAuthConfig config = Oid4vciPreAuthConfig.of(session.getContext().getRealm());
+            OID4VCIPreAuthConfig config = OID4VCIPreAuthConfig.of(session.getContext().getRealm());
             expiry = (long) Time.currentTime() + config.refreshTokenLifespan;
         }
         refreshToken.exp(expiry);
@@ -135,16 +135,16 @@ public class Oid4vciRefreshTokenProvider extends AbstractRefreshTokenProvider {
         if (stashed != null) {
             return stashed;
         }
-        Oid4vciPreAuthConfig config = Oid4vciPreAuthConfig.of(clientSessionCtx.getClientSession().getRealm());
+        OID4VCIPreAuthConfig config = OID4VCIPreAuthConfig.of(clientSessionCtx.getClientSession().getRealm());
         Map<String, Object> claims = new HashMap<>();
         Object refreshId = accessToken.getOtherClaims().get(config.refreshIdClaim);
         if (refreshId == null) {
             throw new RefreshTokenException(OAuthErrorException.INVALID_REQUEST, "access token has no exchange reference");
         }
         claims.put(config.refreshIdClaim, refreshId);
-        Object ids = accessToken.getOtherClaims().get(Oid4vciPreAuthGrantType.CREDENTIAL_CONFIGURATION_IDS_CLAIM);
+        Object ids = accessToken.getOtherClaims().get(OID4VCIPreAuthGrantType.CREDENTIAL_CONFIGURATION_IDS_CLAIM);
         if (ids != null) {
-            claims.put(Oid4vciPreAuthGrantType.CREDENTIAL_CONFIGURATION_IDS_CLAIM, ids);
+            claims.put(OID4VCIPreAuthGrantType.CREDENTIAL_CONFIGURATION_IDS_CLAIM, ids);
         }
         return claims;
     }
@@ -163,7 +163,7 @@ public class Oid4vciRefreshTokenProvider extends AbstractRefreshTokenProvider {
                                                          EventBuilder event) throws OAuthErrorException {
         // Signature, issuer, expiry, not-before, azp and the DPoP / attestation
         // key binding were already checked by TokenManager.verifyRefreshToken.
-        Oid4vciPreAuthConfig config = Oid4vciPreAuthConfig.of(realm);
+        OID4VCIPreAuthConfig config = OID4VCIPreAuthConfig.of(realm);
         if (!config.refreshTokens) {
             throw new OAuthErrorException(OAuthErrorException.INVALID_GRANT, "Refresh tokens are disabled");
         }
@@ -188,7 +188,7 @@ public class Oid4vciRefreshTokenProvider extends AbstractRefreshTokenProvider {
 
         UserSessionModel userSession = new UserSessionManager(session).createUserSession(
                 authSession.getParentSession().getId(), realm, user, user.getUsername(),
-                connection.getRemoteHost(), Oid4vciPreAuthGrantType.AUTH_METHOD + "-refresh", false, null, null,
+                connection.getRemoteHost(), OID4VCIPreAuthGrantType.AUTH_METHOD + "-refresh", false, null, null,
                 UserSessionModel.SessionPersistenceState.TRANSIENT);
         event.session(userSession);
 
@@ -199,9 +199,9 @@ public class Oid4vciRefreshTokenProvider extends AbstractRefreshTokenProvider {
 
         Map<String, Object> claims = new HashMap<>();
         claims.put(config.refreshIdClaim, refreshId);
-        Object ids = oldToken.getOtherClaims().get(Oid4vciPreAuthGrantType.CREDENTIAL_CONFIGURATION_IDS_CLAIM);
+        Object ids = oldToken.getOtherClaims().get(OID4VCIPreAuthGrantType.CREDENTIAL_CONFIGURATION_IDS_CLAIM);
         if (ids != null) {
-            claims.put(Oid4vciPreAuthGrantType.CREDENTIAL_CONFIGURATION_IDS_CLAIM, ids);
+            claims.put(OID4VCIPreAuthGrantType.CREDENTIAL_CONFIGURATION_IDS_CLAIM, ids);
         }
         clientSessionCtx.setAttribute(CLAIMS_ATTR, claims);
         clientSessionCtx.setAttribute(EXPIRY_ATTR, oldToken.getExp());
@@ -220,7 +220,7 @@ public class Oid4vciRefreshTokenProvider extends AbstractRefreshTokenProvider {
         if (claims != null) {
             claims.forEach(accessToken::setOtherClaims);
         }
-        Oid4vciPreAuthConfig config = Oid4vciPreAuthConfig.of(session.getContext().getRealm());
+        OID4VCIPreAuthConfig config = OID4VCIPreAuthConfig.of(session.getContext().getRealm());
         if (config.credentialIssuer != null) {
             accessToken.addAudience(config.credentialIssuer);
         }

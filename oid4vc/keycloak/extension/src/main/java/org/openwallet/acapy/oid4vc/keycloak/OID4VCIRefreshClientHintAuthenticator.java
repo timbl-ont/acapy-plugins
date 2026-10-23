@@ -35,7 +35,7 @@ import org.keycloak.representations.RefreshToken;
  * Add it to the realm's client authentication flow ("clients") as ALTERNATIVE,
  * before "Client Id and Secret".
  */
-public class Oid4vciRefreshClientHintAuthenticator extends AbstractClientAuthenticator {
+public class OID4VCIRefreshClientHintAuthenticator extends AbstractClientAuthenticator {
 
     public static final String PROVIDER_ID = "oid4vci-refresh-client-hint";
 
@@ -57,7 +57,7 @@ public class Oid4vciRefreshClientHintAuthenticator extends AbstractClientAuthent
         }
         KeycloakSession session = context.getSession();
         RefreshToken token = session.tokens().decode(encoded, RefreshToken.class);
-        if (token == null || !Oid4vciRefreshTokenProviderFactory.PROVIDER_ID.equals(token.getProvider())
+        if (token == null || !OID4VCIPreAuthRefreshTokenProviderFactory.PROVIDER_ID.equals(token.getProvider())
                 || token.getIssuedFor() == null) {
             return;
         }

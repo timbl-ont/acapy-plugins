@@ -8,7 +8,7 @@ import org.keycloak.models.RealmModel;
  * Per-realm configuration, read from realm attributes so each realm (one per
  * issuer tenant) can point at its own plugin instance.
  */
-final class Oid4vciPreAuthConfig {
+final class OID4VCIPreAuthConfig {
 
     /**
      * Plugin redeem endpoint on its admin API (required), e.g.
@@ -68,7 +68,7 @@ final class Oid4vciPreAuthConfig {
     final boolean refreshTokens;
     final int refreshTokenLifespan;
 
-    private Oid4vciPreAuthConfig(RealmModel realm) {
+    private OID4VCIPreAuthConfig(RealmModel realm) {
         String redeem = realm.getAttribute(REDEEM_URL);
         this.redeemUrl = redeem == null || redeem.isBlank() ? null : URI.create(redeem.trim());
         this.redeemClientAuth = orDefault(realm.getAttribute(REDEEM_CLIENT_AUTH), "private_key_jwt");
@@ -85,8 +85,8 @@ final class Oid4vciPreAuthConfig {
         this.refreshTokenLifespan = intOr(realm.getAttribute(REFRESH_TOKEN_LIFESPAN), 31_536_000);
     }
 
-    static Oid4vciPreAuthConfig of(RealmModel realm) {
-        return new Oid4vciPreAuthConfig(realm);
+    static OID4VCIPreAuthConfig of(RealmModel realm) {
+        return new OID4VCIPreAuthConfig(realm);
     }
 
     boolean isComplete() {

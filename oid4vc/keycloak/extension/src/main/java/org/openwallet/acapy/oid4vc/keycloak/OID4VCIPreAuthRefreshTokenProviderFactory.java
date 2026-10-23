@@ -6,14 +6,14 @@ import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.protocol.oidc.refresh.RefreshTokenProvider;
 import org.keycloak.protocol.oidc.refresh.RefreshTokenProviderFactory;
 
-/** Registers {@link Oid4vciRefreshTokenProvider}. */
-public class Oid4vciRefreshTokenProviderFactory implements RefreshTokenProviderFactory {
+/** Registers {@link OID4VCIPreAuthRefreshTokenProvider}. */
+public class OID4VCIPreAuthRefreshTokenProviderFactory implements RefreshTokenProviderFactory {
 
     static final String PROVIDER_ID = "acapy-oid4vci-pre-auth";
 
     @Override
     public RefreshTokenProvider create(KeycloakSession session) {
-        return new Oid4vciRefreshTokenProvider(session);
+        return new OID4VCIPreAuthRefreshTokenProvider(session);
     }
 
     @Override

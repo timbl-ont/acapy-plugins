@@ -10,17 +10,17 @@ import org.keycloak.protocol.oidc.grants.OAuth2GrantTypeFactory;
 import org.jboss.logging.Logger;
 
 /**
- * Registers {@link Oid4vciPreAuthGrantType} for the OID4VCI pre-authorized code
+ * Registers {@link OID4VCIPreAuthGrantType} for the OID4VCI pre-authorized code
  * grant type. Keycloak's own experimental implementation uses the same id, so
  * the {@code oid4vc-vci-preauth-code} feature must stay disabled.
  */
-public class Oid4vciPreAuthGrantTypeFactory implements OAuth2GrantTypeFactory {
+public class OID4VCIPreAuthGrantTypeFactory implements OAuth2GrantTypeFactory {
 
-    private static final Logger LOGGER = Logger.getLogger(Oid4vciPreAuthGrantTypeFactory.class);
+    private static final Logger LOGGER = Logger.getLogger(OID4VCIPreAuthGrantTypeFactory.class);
 
     @Override
     public String getId() {
-        return Oid4vciPreAuthGrantType.GRANT_TYPE;
+        return OID4VCIPreAuthGrantType.GRANT_TYPE;
     }
 
     @Override
@@ -31,7 +31,7 @@ public class Oid4vciPreAuthGrantTypeFactory implements OAuth2GrantTypeFactory {
 
     @Override
     public OAuth2GrantType create(KeycloakSession session) {
-        return new Oid4vciPreAuthGrantType();
+        return new OID4VCIPreAuthGrantType();
     }
 
     @Override

@@ -43,14 +43,14 @@ import org.jboss.logging.Logger;
  * (attestation-based client authentication) and bind the token to a DPoP key.
  * It then redeems the code at the plugin and issues a short-lived, DPoP-bound
  * access token for a generic holder user, carrying the exchange's refresh_id,
- * and a long-lived refresh token ({@link Oid4vciRefreshTokenProvider}) bound to
+ * and a long-lived refresh token ({@link OID4VCIPreAuthRefreshTokenProvider}) bound to
  * the same wallet key.
  * <p>
  * Order matters: the client and the DPoP proof are checked before the code is
  * redeemed, so an unauthenticated request cannot burn a code or a tx_code
  * attempt.
  */
-public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
+public class OID4VCIPreAuthGrantType extends OAuth2GrantTypeBase {
 
     static final String GRANT_TYPE = "urn:ietf:params:oauth:grant-type:pre-authorized_code";
     static final String CODE_PARAM = "pre-authorized_code";
@@ -58,15 +58,15 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
     static final String CREDENTIAL_CONFIGURATION_IDS_CLAIM = "credential_configuration_ids";
     static final String AUTH_METHOD = "oid4vci-pre-authorized-code";
 
-    private static final Logger LOGGER = Logger.getLogger(Oid4vciPreAuthGrantType.class);
+    private static final Logger LOGGER = Logger.getLogger(OID4VCIPreAuthGrantType.class);
 
     @Override
     public Response process(Context context) {
         setContext(context);
-        Oid4vciPreAuthConfig config = Oid4vciPreAuthConfig.of(realm);
+        OID4VCIPreAuthConfig config = OID4VCIPreAuthConfig.of(realm);
         if (!config.isComplete()) {
             LOGGER.errorf("Realm '%s' is missing %s / %s", realm.getName(),
-                    Oid4vciPreAuthConfig.REDEEM_URL, Oid4vciPreAuthConfig.CREDENTIAL_ISSUER);
+                    OID4VCIPreAuthConfig.REDEEM_URL, OID4VCIPreAuthConfig.CREDENTIAL_ISSUER);
             event.error(Errors.INVALID_REQUEST);
             throw error(OAuthErrorException.SERVER_ERROR, "pre-authorized code grant is not configured",
                     Response.Status.INTERNAL_SERVER_ERROR);
@@ -158,7 +158,7 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
                 token.exp(cap);
             }
         }
-        // Long-lived refresh token (Oid4vciRefreshTokenProvider). A public
+        // Long-lived refresh token (OID4VCIPreAuthRefreshTokenProvider). A public
         // client's refresh token must be bound to its DPoP key (RFC 9449 §5);
         // confidential clients (e.g. attestation-based) are bound by Keycloak to
         // their attested key.
@@ -172,7 +172,7 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
         return createTokenResponse(responseBuilder, clientSessionCtx, false);
     }
 
-    private void authenticateClient(Oid4vciPreAuthConfig config) {
+    private void authenticateClient(OID4VCIPreAuthConfig config) {
         // A client "presents credentials" when it sends a wallet attestation or
         // any other client authentication the realm understands. A bare
         // client_id is not a credential.

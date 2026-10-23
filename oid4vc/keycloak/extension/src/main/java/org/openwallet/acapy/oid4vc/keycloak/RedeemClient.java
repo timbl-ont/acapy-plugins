@@ -79,7 +79,7 @@ final class RedeemClient {
     private RedeemClient() {
     }
 
-    static Redemption redeem(KeycloakSession session, RealmModel realm, Oid4vciPreAuthConfig config,
+    static Redemption redeem(KeycloakSession session, RealmModel realm, OID4VCIPreAuthConfig config,
                              String code, String txCode, String walletClientId) throws RedeemException {
         Map<String, String> form = new LinkedHashMap<>();
         form.put("pre_authorized_code", code);
@@ -149,7 +149,7 @@ final class RedeemClient {
     }
 
     private static void addClientAuthentication(KeycloakSession session, RealmModel realm,
-                                                Oid4vciPreAuthConfig config, Map<String, String> form) {
+                                                OID4VCIPreAuthConfig config, Map<String, String> form) {
         String clientId = config.redeemClientId != null ? config.redeemClientId
                 : Urls.realmIssuer(session.getContext().getUri().getBaseUri(), realm.getName());
         switch (config.redeemClientAuth) {
@@ -169,11 +169,11 @@ final class RedeemClient {
                 form.put("client_secret", secret(session, config));
             }
             default -> throw new IllegalStateException(
-                    "Unsupported " + Oid4vciPreAuthConfig.REDEEM_CLIENT_AUTH + ": " + config.redeemClientAuth);
+                    "Unsupported " + OID4VCIPreAuthConfig.REDEEM_CLIENT_AUTH + ": " + config.redeemClientAuth);
         }
     }
 
-    private static Map<String, Object> assertionClaims(String clientId, Oid4vciPreAuthConfig config) {
+    private static Map<String, Object> assertionClaims(String clientId, OID4VCIPreAuthConfig config) {
         long now = Time.currentTime();
         Map<String, Object> claims = new LinkedHashMap<>();
         claims.put("iss", clientId);
@@ -196,13 +196,13 @@ final class RedeemClient {
     }
 
     /** The configured secret; a ${vault.key} reference is resolved through the Keycloak vault. */
-    private static String secret(KeycloakSession session, Oid4vciPreAuthConfig config) {
+    private static String secret(KeycloakSession session, OID4VCIPreAuthConfig config) {
         if (config.redeemClientSecret == null) {
-            throw new IllegalStateException(Oid4vciPreAuthConfig.REDEEM_CLIENT_SECRET + " is not set");
+            throw new IllegalStateException(OID4VCIPreAuthConfig.REDEEM_CLIENT_SECRET + " is not set");
         }
         try (VaultStringSecret secret = session.vault().getStringSecret(config.redeemClientSecret)) {
             return secret.get().orElseThrow(() -> new IllegalStateException(
-                    Oid4vciPreAuthConfig.REDEEM_CLIENT_SECRET + " could not be resolved"));
+                    OID4VCIPreAuthConfig.REDEEM_CLIENT_SECRET + " could not be resolved"));
         }
     }
 }

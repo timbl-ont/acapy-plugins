@@ -81,11 +81,20 @@ cp target/keycloak-oid4vci-pre-auth.jar /opt/keycloak/providers/
 
 Or build the image in [`Dockerfile`](Dockerfile) (`docker build oid4vc/keycloak`).
 
-The extension uses Keycloak's grant type SPI (`OAuth2GrantTypeSpi`), which is
-**internal** to Keycloak and may change between releases. Keep the Keycloak
-version pinned (`keycloak.version` in `pom.xml`, currently 26.8.0) and re-test
-on every upgrade. Keycloak logs a warning at startup that the SPI is internal;
-this is expected.
+The extension uses Keycloak's grant type and refresh token SPIs
+(`OAuth2GrantTypeSpi`, `RefreshTokenSpi`), which are **internal** to Keycloak
+and may change between releases. Keep the Keycloak version pinned
+(`keycloak.version` in `pom.xml`, currently 26.8.0) and re-test on every
+upgrade (see [Integration tests](#integration-tests)). Keycloak logs a warning
+at startup that the SPI is internal; this is expected.
+
+The extension registers three providers:
+
+| Class | SPI | Provider id |
+|---|---|---|
+| `OID4VCIPreAuthGrantTypeFactory` | grant type | `urn:ietf:params:oauth:grant-type:pre-authorized_code` |
+| `OID4VCIPreAuthRefreshTokenProviderFactory` | refresh token | `acapy-oid4vci-pre-auth` |
+| `OID4VCIRefreshClientHintAuthenticator` | client authenticator | `oid4vci-refresh-client-hint` |
 
 ### 2. Server features
 
@@ -115,7 +124,16 @@ the same issuer.
 ### 3. Realm
 
 Use one realm per issuer tenant. All settings are realm attributes, so each
-realm can point at its own plugin tenant:
+realm can point at its own plugin tenant.
+
+Realm attributes aren't shown in the Keycloak admin console. Set and inspect
+them through a realm import (`attributes` in the realm JSON), the admin REST
+API, or `kcadm.sh`, for example:
+
+```bash
+kcadm.sh update realms/oid4vci -s 'attributes."oid4vci.redeem.url"=http://issuer:3001/oid4vci/pre-auth/redeem'
+kcadm.sh get realms/oid4vci --fields attributes
+```
 
 | Realm attribute | Default | Meaning |
 |---|---|---|
@@ -211,7 +229,7 @@ sequenceDiagram
   P-->>W: refreshed credential
 ```
 
-How it works (`Oid4vciRefreshTokenProvider`, following the design of
+How it works (`OID4VCIPreAuthRefreshTokenProvider`, following the design of
 Keycloak's own OID4VCI refresh tokens):
 
 - **No sessions.** The refresh token is a self-contained JWT signed by the
@@ -353,6 +371,33 @@ only redeem codes for the tenant configured for it.
 
 Keep the admin port internal as usual; only Keycloak needs to reach the
 redeem endpoint.
+
+## Integration tests
+
+[`extension/src/it`](extension/src/it) runs the extension in a real Keycloak
+using Keycloak's test framework (distribution mode, with the extension
+deployed from the project), against a stub of the plugin's redeem endpoint. It
+covers the anonymous (no attestation) path:
+- the DPoP requirement;
+- the redeem call and its client assertion;
+- access token claims and binding;
+- refresh claims, key binding and rotation;
+- the refresh client hint.
+
+The tests need Java 21 and free ports 8080, 8443, 9001 and 8500. They're in a
+Maven profile so the normal build and the Docker image don't download the test
+framework:
+
+```bash
+cd oid4vc/keycloak/extension
+mvn -B -Pit verify
+```
+
+Or in a container:
+
+```bash
+podman run --rm -v "$PWD":/build:Z -v kc-it-m2:/root/.m2 -w /build docker.io/library/maven:3.9-eclipse-temurin-21 mvn -B -Pit verify
+```
 
 ## End-to-end test
 
