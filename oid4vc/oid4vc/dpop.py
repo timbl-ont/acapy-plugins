@@ -16,10 +16,11 @@ from .jose_util import (
     ASYMMETRIC_ALGS,
     PRIVATE_JWK_MEMBERS,
     JoseError,
+    JoseSignatureError,
     ReplayCache,
-    decode_jws,
+    decode_jwt,
     jwk_thumbprint,
-    verify_signature,
+    unverified_header,
 )
 
 DPOP_HEADER = "DPoP"
@@ -94,7 +95,7 @@ def verify_dpop_proof(
     if "," in proof:
         raise DPoPError("multiple DPoP proofs")
     try:
-        header, payload, signing_input, signature = decode_jws(proof)
+        header = unverified_header(proof)
     except JoseError as err:
         raise DPoPError(f"malformed DPoP proof: {err}") from err
 
@@ -109,11 +110,20 @@ def verify_dpop_proof(
     if PRIVATE_JWK_MEMBERS.intersection(jwk):
         raise DPoPError("DPoP proof jwk must not contain a private key")
     try:
-        if not verify_signature(alg, jwk, signing_input, signature):
-            raise DPoPError("DPoP proof signature is invalid")
         thumbprint = jwk_thumbprint(jwk)
+        # Signature, presence of the required claims and iat not in the future
+        # (beyond leeway); proofs have no exp.
+        _, payload = decode_jwt(
+            proof,
+            jwk,
+            require=("jti", "htm", "htu", "iat"),
+            verify_exp=False,
+            leeway=leeway,
+        )
+    except JoseSignatureError as err:
+        raise DPoPError("DPoP proof signature is invalid") from err
     except JoseError as err:
-        raise DPoPError(f"DPoP proof key error: {err}") from err
+        raise DPoPError(f"DPoP proof is invalid: {err}") from err
 
     jti = payload.get("jti")
     if not isinstance(jti, str) or not jti:

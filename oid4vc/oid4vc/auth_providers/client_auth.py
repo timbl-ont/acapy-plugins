@@ -22,17 +22,17 @@ parameters instead.
 """
 
 import hmac
-import time
 from dataclasses import dataclass
 from typing import Mapping
 
 from ..jose_util import (
+    JoseAudienceError,
     JoseError,
+    JoseIssuerError,
+    JoseSubjectError,
     JWKSCache,
     ReplayCache,
-    audience_matches,
-    check_time_claims,
-    verify_hmac_jws,
+    decode_hmac_jwt,
 )
 from .base import BackChannelAuthError
 
@@ -96,36 +96,42 @@ async def authenticate_client(
     if not assertion:
         raise BackChannelAuthError("client_assertion is required")
 
+    claim_checks = {
+        "audience": client.audience or endpoint_url,
+        "issuer": client.client_id,
+        "subject": client.client_id,
+        "leeway": CLOCK_LEEWAY,
+        "require": ("exp", "iat", "jti", "iss", "sub", "aud"),
+    }
     try:
         if client.auth_method == PRIVATE_KEY_JWT:
             if not client.jwks_uri:
                 raise BackChannelAuthError("no JWKS configured for private_key_jwt")
-            _, payload = await jwks_cache.verify(client.jwks_uri, assertion)
+            _, payload = await jwks_cache.decode(
+                client.jwks_uri, assertion, **claim_checks
+            )
         else:
             if not client.client_secret:
                 raise BackChannelAuthError("no secret configured for client_secret_jwt")
-            _, payload = verify_hmac_jws(assertion, client.client_secret)
-        check_time_claims(payload, leeway=CLOCK_LEEWAY)
+            payload = decode_hmac_jwt(assertion, client.client_secret, **claim_checks)
+    except JoseAudienceError as err:
+        raise BackChannelAuthError("client_assertion audience mismatch") from err
+    except (JoseIssuerError, JoseSubjectError) as err:
+        raise BackChannelAuthError(
+            "client_assertion iss/sub must equal client_id"
+        ) from err
     except JoseError as err:
         raise BackChannelAuthError(f"invalid client_assertion: {err}") from err
 
-    if payload.get("iss") != client.client_id or payload.get("sub") != client.client_id:
-        raise BackChannelAuthError("client_assertion iss/sub must equal client_id")
-    if not audience_matches(payload.get("aud"), client.audience or endpoint_url):
-        raise BackChannelAuthError("client_assertion audience mismatch")
     for name, value in required_claims.items():
         if payload.get(name) != value:
             raise BackChannelAuthError(f"client_assertion {name} mismatch")
-    iat = payload.get("iat")
-    if (
-        not isinstance(iat, (int, float))
-        or payload["exp"] - iat > MAX_ASSERTION_LIFETIME
-        or iat > time.time() + CLOCK_LEEWAY
-    ):
+    # exp/iat/nbf validity was checked by PyJWT; also cap the lifetime.
+    if payload["exp"] - payload["iat"] > MAX_ASSERTION_LIFETIME:
         raise BackChannelAuthError("client_assertion lifetime is not acceptable")
-    jti = payload.get("jti")
-    if not isinstance(jti, str) or not jti:
-        raise BackChannelAuthError("client_assertion has no jti")
+    jti = payload["jti"]
+    if not isinstance(jti, str):
+        raise BackChannelAuthError("client_assertion jti must be a string")
     if not replay_cache.check_and_add(
         f"{client.client_id}:{jti}", payload["exp"] + CLOCK_LEEWAY
     ):

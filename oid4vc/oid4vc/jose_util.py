@@ -1,24 +1,29 @@
-"""Minimal JOSE helpers: JWS verification against a JWK, RFC 7638 thumbprints, JWKS.
+"""JOSE helpers for externally issued JWTs and DPoP proofs, built on PyJWT.
 
 ACA-Py's ``jwt_verify`` resolves keys through the wallet and askar, which only
 supports EdDSA and ES256. Tokens issued by an external authorization server
 (e.g. Keycloak, RS256 by default) and DPoP proofs (any asymmetric algorithm)
-need a verifier that works from a bare public JWK; this module provides one on
-top of ``cryptography``.
+need verification against a bare public JWK. PyJWT (a dependency of
+``acapy-agent``) does the signature and registered-claim checks; this module
+adds what PyJWT doesn't provide: algorithm/key policy, RFC 7638 thumbprints, an
+async JWKS cache and a replay cache.
 """
 
 import base64
 import hashlib
-import hmac
 import json
 import logging
 import time
-from typing import Any, Mapping, Tuple
+from typing import Any, Iterable, Mapping
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519, ed448, padding, rsa
-from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+import jwt
+from jwt.exceptions import (
+    InvalidAudienceError,
+    InvalidIssuerError,
+    InvalidSignatureError,
+    InvalidSubjectError,
+    PyJWTError,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -35,16 +40,11 @@ ASYMMETRIC_ALGS = frozenset(
         "ES384",
         "ES512",
         "EdDSA",
-        "Ed25519",
     }
 )
+HMAC_ALGS = frozenset({"HS256", "HS384", "HS512"})
 
-_HASHES = {"256": hashes.SHA256, "384": hashes.SHA384, "512": hashes.SHA512}
-_EC_CURVES = {
-    "P-256": (ec.SECP256R1, 32),
-    "P-384": (ec.SECP384R1, 48),
-    "P-521": (ec.SECP521R1, 66),
-}
+# ESxxx requires a specific curve (RFC 7518 §3.4).
 _EC_ALG_CURVE = {"ES256": "P-256", "ES384": "P-384", "ES512": "P-521"}
 
 # JWK members that only appear in private keys.
@@ -55,12 +55,20 @@ class JoseError(ValueError):
     """Raised when a JWS cannot be parsed or verified."""
 
 
-def b64url_decode(value: str) -> bytes:
-    """Decode unpadded base64url."""
-    try:
-        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-    except (ValueError, TypeError) as err:
-        raise JoseError("invalid base64url encoding") from err
+class JoseSignatureError(JoseError):
+    """The signature does not verify."""
+
+
+class JoseAudienceError(JoseError):
+    """The ``aud`` claim does not match."""
+
+
+class JoseIssuerError(JoseError):
+    """The ``iss`` claim does not match."""
+
+
+class JoseSubjectError(JoseError):
+    """The ``sub`` claim does not match."""
 
 
 def b64url_encode(value: bytes) -> str:
@@ -68,120 +76,133 @@ def b64url_encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
 
 
-def decode_jws(token: str) -> Tuple[dict, dict, bytes, bytes]:
-    """Split a compact JWS into (header, payload, signing_input, signature).
-
-    Does not verify anything.
-    """
-    if not isinstance(token, str):
-        raise JoseError("JWS must be a string")
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise JoseError("JWS must have three parts")
+def unverified_header(token: str) -> dict:
+    """Return the JWS header without verifying anything."""
     try:
-        header = json.loads(b64url_decode(parts[0]))
-        payload = json.loads(b64url_decode(parts[1]))
-    except (json.JSONDecodeError, UnicodeDecodeError) as err:
-        raise JoseError("JWS header or payload is not JSON") from err
-    if not isinstance(header, dict) or not isinstance(payload, dict):
-        raise JoseError("JWS header and payload must be JSON objects")
-    return header, payload, f"{parts[0]}.{parts[1]}".encode(), b64url_decode(parts[2])
+        return jwt.get_unverified_header(token)
+    except PyJWTError as err:
+        raise JoseError(f"malformed JWS: {err}") from err
 
 
-def _int(value: str) -> int:
-    return int.from_bytes(b64url_decode(value), "big")
-
-
-def public_key_from_jwk(jwk: Mapping[str, Any]):
-    """Build a ``cryptography`` public key from a public JWK."""
-    kty = jwk.get("kty")
+def unverified_claims(token: str) -> dict:
+    """Return the JWT claims without verifying anything."""
     try:
-        if kty == "RSA":
-            return rsa.RSAPublicNumbers(_int(jwk["e"]), _int(jwk["n"])).public_key()
-        if kty == "EC":
-            curve_cls, _ = _EC_CURVES[jwk["crv"]]
-            return ec.EllipticCurvePublicNumbers(
-                _int(jwk["x"]), _int(jwk["y"]), curve_cls()
-            ).public_key()
-        if kty == "OKP":
-            raw = b64url_decode(jwk["x"])
-            if jwk.get("crv") == "Ed25519":
-                return ed25519.Ed25519PublicKey.from_public_bytes(raw)
-            if jwk.get("crv") == "Ed448":
-                return ed448.Ed448PublicKey.from_public_bytes(raw)
-    except (KeyError, ValueError) as err:
-        raise JoseError(f"invalid {kty} JWK") from err
-    raise JoseError(f"unsupported JWK kty/crv: {kty}/{jwk.get('crv')}")
+        return jwt.decode(token, options={"verify_signature": False})
+    except PyJWTError as err:
+        raise JoseError(f"malformed JWT: {err}") from err
 
 
-def verify_signature(
-    alg: str, jwk: Mapping[str, Any], signing_input: bytes, signature: bytes
-) -> bool:
-    """Verify a JWS signature with the given public JWK."""
+def public_key(jwk: Mapping[str, Any], alg: str):
+    """Load a public JWK for ``alg``, enforcing the algorithm/key policy."""
     if alg not in ASYMMETRIC_ALGS:
-        raise JoseError(f"unsupported alg: {alg}")
-    key = public_key_from_jwk(jwk)
+        raise JoseError(f"alg not allowed: {alg}")
+    if alg in _EC_ALG_CURVE and jwk.get("crv") != _EC_ALG_CURVE[alg]:
+        raise JoseError(f"{alg} requires curve {_EC_ALG_CURVE[alg]}")
     try:
-        if alg.startswith(("RS", "PS")):
-            if not isinstance(key, rsa.RSAPublicKey):
-                raise JoseError(f"{alg} requires an RSA key")
-            hash_alg = _HASHES[alg[2:]]()
-            pad = (
-                padding.PKCS1v15()
-                if alg.startswith("RS")
-                else padding.PSS(
-                    mgf=padding.MGF1(hash_alg), salt_length=hash_alg.digest_size
-                )
-            )
-            key.verify(signature, signing_input, pad, hash_alg)
-        elif alg.startswith("ES"):
-            if not isinstance(key, ec.EllipticCurvePublicKey):
-                raise JoseError(f"{alg} requires an EC key")
-            if jwk.get("crv") != _EC_ALG_CURVE[alg]:
-                raise JoseError(f"{alg} requires curve {_EC_ALG_CURVE[alg]}")
-            size = _EC_CURVES[jwk["crv"]][1]
-            if len(signature) != 2 * size:
-                return False
-            der = encode_dss_signature(
-                int.from_bytes(signature[:size], "big"),
-                int.from_bytes(signature[size:], "big"),
-            )
-            key.verify(der, signing_input, ec.ECDSA(_HASHES[alg[2:]]()))
-        else:  # EdDSA / Ed25519
-            if not isinstance(key, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
-                raise JoseError(f"{alg} requires an OKP key")
-            key.verify(signature, signing_input)
-    except InvalidSignature:
-        return False
-    return True
+        return jwt.PyJWK(dict(jwk), algorithm=alg).key
+    except PyJWTError as err:
+        raise JoseError(f"JWK unusable for {alg}: {err}") from err
 
 
-def verify_jws(
-    token: str, jwk: Mapping[str, Any], allowed_algs=ASYMMETRIC_ALGS
-) -> Tuple[dict, dict]:
-    """Verify a compact JWS against a JWK; return (header, payload)."""
-    header, payload, signing_input, signature = decode_jws(token)
+def _decode(
+    token: str,
+    key: Any,
+    alg: str,
+    *,
+    audience: str | None,
+    issuer: str | None,
+    subject: str | None,
+    leeway: float,
+    require: Iterable[str],
+    verify_exp: bool,
+) -> dict:
+    try:
+        return jwt.decode(
+            token,
+            key,
+            algorithms=[alg],
+            audience=audience,
+            issuer=issuer,
+            subject=subject,
+            leeway=leeway,
+            options={
+                "require": list(require),
+                "verify_aud": audience is not None,
+                "verify_exp": verify_exp,
+            },
+        )
+    except InvalidSignatureError as err:
+        raise JoseSignatureError("invalid signature") from err
+    except InvalidAudienceError as err:
+        raise JoseAudienceError(str(err)) from err
+    except InvalidIssuerError as err:
+        raise JoseIssuerError(str(err)) from err
+    except InvalidSubjectError as err:
+        raise JoseSubjectError(str(err)) from err
+    except PyJWTError as err:
+        raise JoseError(str(err)) from err
+
+
+def decode_jwt(
+    token: str,
+    jwk: Mapping[str, Any],
+    *,
+    allowed_algs: Iterable[str] = ASYMMETRIC_ALGS,
+    audience: str | None = None,
+    issuer: str | None = None,
+    subject: str | None = None,
+    leeway: float = 30,
+    require: Iterable[str] = ("exp",),
+    verify_exp: bool = True,
+) -> tuple[dict, dict]:
+    """Verify a JWT against a public JWK and validate its claims.
+
+    Returns ``(header, claims)``. ``exp``/``nbf``/``iat`` are validated by
+    PyJWT; ``aud``/``iss``/``sub`` only when given.
+    """
+    header = unverified_header(token)
     alg = header.get("alg")
     if alg not in allowed_algs:
         raise JoseError(f"alg not allowed: {alg}")
-    if not verify_signature(alg, jwk, signing_input, signature):
-        raise JoseError("invalid signature")
-    return header, payload
+    claims = _decode(
+        token,
+        public_key(jwk, alg),
+        alg,
+        audience=audience,
+        issuer=issuer,
+        subject=subject,
+        leeway=leeway,
+        require=require,
+        verify_exp=verify_exp,
+    )
+    return header, claims
 
 
-HMAC_ALGS = {"HS256": hashlib.sha256, "HS384": hashlib.sha384, "HS512": hashlib.sha512}
-
-
-def verify_hmac_jws(token: str, secret: str) -> Tuple[dict, dict]:
-    """Verify an HMAC-signed compact JWS (``client_secret_jwt``)."""
-    header, payload, signing_input, signature = decode_jws(token)
-    digest = HMAC_ALGS.get(header.get("alg"))
-    if digest is None:
-        raise JoseError(f"alg not allowed: {header.get('alg')}")
-    expected = hmac.new(secret.encode(), signing_input, digest).digest()
-    if not hmac.compare_digest(expected, signature):
-        raise JoseError("invalid signature")
-    return header, payload
+def decode_hmac_jwt(
+    token: str,
+    secret: str,
+    *,
+    audience: str | None = None,
+    issuer: str | None = None,
+    subject: str | None = None,
+    leeway: float = 30,
+    require: Iterable[str] = ("exp",),
+) -> dict:
+    """Verify an HMAC-signed JWT (``client_secret_jwt``) and validate its claims."""
+    alg = unverified_header(token).get("alg")
+    if alg not in HMAC_ALGS:
+        raise JoseError(f"alg not allowed: {alg}")
+    return _decode(
+        token,
+        secret,
+        alg,
+        audience=audience,
+        issuer=issuer,
+        subject=subject,
+        leeway=leeway,
+        require=require,
+        verify_exp=True,
+    )
 
 
 def jwk_thumbprint(jwk: Mapping[str, Any]) -> str:
@@ -203,33 +224,12 @@ def jwk_thumbprint(jwk: Mapping[str, Any]) -> str:
     return b64url_encode(hashlib.sha256(data).digest())
 
 
-def check_time_claims(payload: Mapping[str, Any], leeway: int = 30) -> None:
-    """Validate exp/nbf (exp required)."""
-    now = time.time()
-    exp = payload.get("exp")
-    if not isinstance(exp, (int, float)):
-        raise JoseError("token has no exp")
-    if exp + leeway < now:
-        raise JoseError("token expired")
-    nbf = payload.get("nbf")
-    if isinstance(nbf, (int, float)) and nbf - leeway > now:
-        raise JoseError("token not yet valid")
-
-
-def audience_matches(aud: Any, expected: str) -> bool:
-    """Return True if ``expected`` is (one of) the token audience(s)."""
-    if isinstance(aud, str):
-        return aud == expected
-    if isinstance(aud, list):
-        return expected in aud
-    return False
-
-
 class JWKSCache:
     """Small async JWKS cache keyed by JWKS URI.
 
     Keys are refetched after ``ttl`` seconds, or immediately (rate limited) when
-    a token references an unknown ``kid`` to pick up key rotation.
+    a token references an unknown ``kid`` to pick up key rotation. (PyJWT's
+    ``PyJWKClient`` is synchronous, so it can't be used on the event loop.)
     """
 
     def __init__(self, ttl: int = 300, min_refresh_interval: int = 10):
@@ -280,11 +280,11 @@ class JWKSCache:
             raise JoseError(f"no matching key in JWKS for kid {kid!r}")
         return key
 
-    async def verify(self, jwks_uri: str, token: str) -> Tuple[dict, dict]:
-        """Verify ``token`` against the JWKS at ``jwks_uri``."""
-        header, _, _, _ = decode_jws(token)
+    async def decode(self, jwks_uri: str, token: str, **kwargs) -> tuple[dict, dict]:
+        """Verify ``token`` against the JWKS at ``jwks_uri``; see ``decode_jwt``."""
+        header = unverified_header(token)
         key = await self.get_key(jwks_uri, header.get("kid"), header.get("alg"))
-        return verify_jws(token, key)
+        return decode_jwt(token, key, **kwargs)
 
 
 class ReplayCache:

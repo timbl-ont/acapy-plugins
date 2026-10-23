@@ -44,11 +44,11 @@ from oid4vc.auth_providers.client_auth import (
     authenticate_client,
 )
 from oid4vc.jose_util import (
+    JoseAudienceError,
     JoseError,
+    JoseIssuerError,
     JWKSCache,
     ReplayCache,
-    audience_matches,
-    check_time_claims,
 )
 from oid4vc.jwt import JWTVerifyResult
 
@@ -82,9 +82,6 @@ class KeycloakProvider(AuthServerProvider):
         base = (ctx.setting("private_url") or self._public_url(ctx)).rstrip("/")
         return ctx.setting("jwks_uri", f"{base}/protocol/openid-connect/certs")
 
-    async def _verify_realm_jwt(self, ctx: AuthContext, token: str):
-        return await self._jwks.verify(self._jwks_uri(ctx), token)
-
     def authorization_servers(self, ctx: AuthContext) -> list[str] | None:
         """Advertise the realm as the authorization server."""
         return [self._public_url(ctx)]
@@ -102,17 +99,21 @@ class KeycloakProvider(AuthServerProvider):
     ) -> JWTVerifyResult:
         """Validate a Keycloak access token against the realm JWKS."""
         try:
-            header, payload = await self._verify_realm_jwt(ctx, token)
-            check_time_claims(payload)
+            header, payload = await self._jwks.decode(
+                self._jwks_uri(ctx),
+                token,
+                issuer=self._issuer(ctx),
+                audience=ctx.setting("audience", ctx.issuer_url),
+                require=("exp", "iss", "aud"),
+            )
+        except JoseIssuerError as err:
+            raise InvalidTokenError("Token issuer mismatch") from err
+        except JoseAudienceError as err:
+            raise InvalidTokenError("Token audience mismatch") from err
         except JoseError as err:
             LOGGER.info("Keycloak access token rejected: %s", err)
             raise InvalidTokenError("Token verification failed") from err
 
-        if payload.get("iss") != self._issuer(ctx):
-            raise InvalidTokenError("Token issuer mismatch")
-        audience = ctx.setting("audience", ctx.issuer_url)
-        if not audience_matches(payload.get("aud"), audience):
-            raise InvalidTokenError("Token audience mismatch")
         if not self.exchange_key(ctx, payload):
             raise InvalidTokenError("Token does not reference a credential exchange")
         return JWTVerifyResult(headers=header, payload=payload, verified=True)

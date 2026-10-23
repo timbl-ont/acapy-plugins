@@ -44,7 +44,7 @@ from ..auth_providers import (
 )
 from ..auth_providers.client_auth import CREDENTIAL_ISSUER_CLAIM
 from ..config import Config
-from ..jose_util import JoseError, decode_jws
+from ..jose_util import JoseError, unverified_claims
 from ..models.supported_cred import SupportedCredential
 from ..oauth_errors import oauth_error_response
 from ..pre_auth import PreAuthCodeError, redeem_pre_auth_code
@@ -67,7 +67,7 @@ def _claimed_credential_issuer(params: dict[str, str]) -> str | None:
     if not assertion:
         return from_param
     try:
-        _, payload, _, _ = decode_jws(assertion)
+        payload = unverified_claims(assertion)
     except JoseError:
         return None
     from_assertion = payload.get(CREDENTIAL_ISSUER_CLAIM)
