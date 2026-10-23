@@ -85,6 +85,7 @@ async def _receive_notification_inner(request: web.Request) -> web.Response:
         request.headers.get("Authorization"),
         dpop_proof=request.headers.get(DPOP_HEADER),
         htu=public_request_url(Config.from_settings(context.settings), request),
+        published_endpoint="notification_endpoint",
     )
 
     try:

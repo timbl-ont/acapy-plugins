@@ -4,6 +4,7 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from acapy_agent.wallet.base import WalletError
 from aiohttp import web
 from yarl import URL
 
@@ -237,6 +238,40 @@ async def test_builtin_token_invalid_dpop_keeps_code(monkeypatch, context):
     async with context.profile.session() as session:
         rec = await OID4VCIExchangeRecord.retrieve_by_code(session, record.code)
     assert rec.code_redeemed_at is None
+
+
+@pytest.mark.asyncio
+async def test_builtin_token_signing_failure_keeps_code(monkeypatch, context):
+    record = await _offer(context)
+    monkeypatch.setattr(
+        _token_module,
+        "retrieve_or_create_did_jwk",
+        AsyncMock(return_value=MagicMock(did="did:jwk:fake")),
+    )
+    monkeypatch.setattr(
+        _token_module, "jwt_sign", AsyncMock(side_effect=WalletError("x"))
+    )
+    request = _request(context, path="/token")
+    request.post = AsyncMock(
+        return_value={
+            "grant_type": "urn:ietf:params:oauth:grant-type:pre-authorized_code",
+            "pre-authorized_code": record.code,
+        }
+    )
+    resp = await _token_module.token(cast(web.Request, request))
+    assert resp.status == 500
+    assert json.loads(resp.body)["error"] == "server_error"
+    async with context.profile.session() as session:
+        rec = await OID4VCIExchangeRecord.retrieve_by_code(session, record.code)
+    assert rec.code_redeemed_at is None and rec.token is None
+
+    # The same code is still redeemable once signing works.
+    monkeypatch.setattr(_token_module, "jwt_sign", AsyncMock(return_value="tok"))
+    resp = await _token_module.token(cast(web.Request, request))
+    assert resp.status == 200
+    async with context.profile.session() as session:
+        rec = await OID4VCIExchangeRecord.retrieve_by_code(session, record.code)
+    assert rec.token == "tok" and rec.code_redeemed_at
 
 
 @pytest.mark.asyncio

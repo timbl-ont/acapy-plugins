@@ -1,41 +1,14 @@
 """Helper functions for OID4VC routes."""
 
 from acapy_agent.admin.request_context import AdminRequestContext
-from acapy_agent.core.profile import Profile
 from acapy_agent.messaging.models.base import BaseModelError
 from acapy_agent.storage.error import StorageError
 from aiohttp import web
 
-from ..auth_providers import (
-    AuthContext,
-    AuthServerConfigError,
-    AuthServerRegistry,
-    default_registry,
-    provider_type,
-)
+from ..auth_providers import AuthServerConfigError, resolve_auth_provider
 from ..config import Config
 from ..models.exchange import OID4VCIExchangeRecord
 from ..models.supported_cred import SupportedCredential
-from ..utils import get_first_auth_server
-
-
-async def _create_pre_auth_code(
-    profile: Profile,
-    config: Config,
-    auth_server: dict | None,
-    subject_id: str,
-    credential_configuration_id: str | None = None,
-    user_pin: str | None = None,
-) -> str:
-    """Create a pre-authorized code via the configured authorization server provider."""
-    registry = profile.inject_or(AuthServerRegistry) or default_registry()
-    provider = registry.get(provider_type(auth_server))
-    return await provider.create_pre_authorized_code(
-        AuthContext(profile, config, dict(auth_server or {})),
-        subject_id=subject_id,
-        credential_configuration_id=credential_configuration_id,
-        user_pin=user_pin,
-    )
 
 
 async def _parse_cred_offer(context: AdminRequestContext, exchange_id: str) -> dict:
@@ -51,16 +24,12 @@ async def _parse_cred_offer(context: AdminRequestContext, exchange_id: str) -> d
                 session, record.supported_cred_id
             )
             if record.state == OID4VCIExchangeRecord.STATE_CREATED:
-                auth_server = await get_first_auth_server(session, context.profile)
-                if auth_server is None:
-                    auth_server = config.auth_server
-                record.code = await _create_pre_auth_code(
-                    context.profile,
-                    config,
-                    auth_server,
-                    record.refresh_id,
-                    supported.identifier,
-                    record.pin,
+                provider, ctx = await resolve_auth_provider(session, context.profile)
+                record.code = await provider.create_pre_authorized_code(
+                    ctx,
+                    subject_id=record.refresh_id,
+                    credential_configuration_id=supported.identifier,
+                    user_pin=record.pin,
                 )
                 record.state = OID4VCIExchangeRecord.STATE_OFFER_CREATED
                 await record.save(session, reason="Credential offer created")

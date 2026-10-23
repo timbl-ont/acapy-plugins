@@ -54,6 +54,14 @@ from oid4vc.jwt import JWTVerifyResult
 
 LOGGER = logging.getLogger(__name__)
 
+# Keycloak's ``typ`` claim on access tokens, initial or refreshed: ``Bearer``,
+# or ``DPoP`` when bound (``bearer`` with a client's deprecated "Use lower-case
+# bearer type in token responses" switch, so compared case-insensitively).
+# ID and logout tokens are signed with the same realm keys and must not pass
+# as access tokens. (Refresh tokens are signed with the realm's internal HMAC
+# key, which is not in the JWKS, so they already fail signature verification.)
+ACCESS_TOKEN_TYPES = frozenset({"bearer", "dpop"})
+
 
 class KeycloakProvider(AuthServerProvider):
     """Keycloak realm as the authorization server."""
@@ -114,6 +122,9 @@ class KeycloakProvider(AuthServerProvider):
             LOGGER.info("Keycloak access token rejected: %s", err)
             raise InvalidTokenError("Token verification failed") from err
 
+        typ = payload.get("typ")
+        if not isinstance(typ, str) or typ.lower() not in ACCESS_TOKEN_TYPES:
+            raise InvalidTokenError("Token is not an access token")
         if not self.exchange_key(ctx, payload):
             raise InvalidTokenError("Token does not reference a credential exchange")
         return JWTVerifyResult(headers=header, payload=payload, verified=True)

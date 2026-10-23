@@ -13,6 +13,7 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.spec.ECGenParameterSpec;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -184,6 +185,25 @@ public class OID4VCIPreAuthGrantTypeTest {
         HttpResponse<String> response = tokenRequest(new Wallet(), true);
         assertEquals(400, response.statusCode(), response.body());
         assertEquals("invalid_grant", json(response.body()).get("error"));
+    }
+
+    @Test
+    public void invalidRedeemUrlIsReportedAsNotConfigured() throws Exception {
+        RealmRepresentation rep = realm.admin().toRepresentation();
+        Map<String, String> attributes = new HashMap<>(rep.getAttributes());
+        attributes.put(OID4VCIPreAuthConfig.REDEEM_URL, REDEEM_URL + " with a space");
+        rep.setAttributes(attributes);
+        realm.admin().update(rep);
+        try {
+            HttpResponse<String> response = tokenRequest(new Wallet(), true);
+            assertEquals(500, response.statusCode(), response.body());
+            assertEquals("server_error", json(response.body()).get("error"));
+            assertTrue(redeemCalls.isEmpty(), "nothing is redeemed");
+        } finally {
+            attributes.put(OID4VCIPreAuthConfig.REDEEM_URL, REDEEM_URL);
+            rep.setAttributes(attributes);
+            realm.admin().update(rep);
+        }
     }
 
     @Test

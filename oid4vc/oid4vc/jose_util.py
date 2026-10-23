@@ -268,13 +268,11 @@ class JWKSCache:
         """Return the JWK for ``kid`` from ``jwks_uri``."""
         entry = self._entries.get(jwks_uri)
         now = time.monotonic()
-        if entry is None or now - entry[0] > self.ttl:
-            keys = await self._fetch(jwks_uri)
-        else:
-            keys = entry[1]
+        fetched = entry is None or now - entry[0] > self.ttl
+        keys = await self._fetch(jwks_uri) if fetched else entry[1]
         key = self._select(keys, kid, alg)
-        stale = entry is not None and now - entry[0] > self.min_refresh_interval
-        if key is None and stale:
+        if key is None and not fetched and now - entry[0] > self.min_refresh_interval:
+            # Unknown kid in a cached set: refetch (rate limited) to pick up rotation.
             key = self._select(await self._fetch(jwks_uri), kid, alg)
         if key is None:
             raise JoseError(f"no matching key in JWKS for kid {kid!r}")
@@ -291,21 +289,34 @@ class ReplayCache:
     """In-memory single-use identifier cache (per process).
 
     Deployments with several plugin instances behind a load balancer need
-    shared storage for full replay protection; within one instance this is exact.
+    shared storage for full replay protection; within one instance this is exact
+    as long as fewer than ``max_entries`` identifiers are live at once: beyond
+    that the oldest entries (the ones closest to expiry) are evicted.
     """
 
-    def __init__(self, max_entries: int = 100_000):
+    def __init__(self, max_entries: int = 100_000, min_prune_interval: float = 1.0):
         """Initialize the cache."""
         self.max_entries = max_entries
-        self._seen: dict[str, float] = {}
+        self.min_prune_interval = min_prune_interval
+        self._seen: dict[str, float] = {}  # insertion ordered
+        self._next_prune = 0.0
 
     def check_and_add(self, value: str, expires_at: float) -> bool:
         """Record ``value``; return False if it was already seen and not expired."""
         now = time.time()
-        if len(self._seen) >= self.max_entries:
-            self._seen = {k: v for k, v in self._seen.items() if v > now}
         seen_until = self._seen.get(value)
         if seen_until is not None and seen_until > now:
             return False
+        if len(self._seen) >= self.max_entries:
+            self._make_room(now)
         self._seen[value] = expires_at
         return True
+
+    def _make_room(self, now: float) -> None:
+        # A full scan for expired entries at most every min_prune_interval
+        # seconds; if the cache is still full, evict the oldest entries.
+        if now >= self._next_prune:
+            self._seen = {k: v for k, v in self._seen.items() if v > now}
+            self._next_prune = now + self.min_prune_interval
+        while len(self._seen) >= self.max_entries:
+            del self._seen[next(iter(self._seen))]

@@ -320,6 +320,13 @@ or per tenant, with `PUT /oid4vci/issuer/configuration`:
 | `redeem_client.jwks_uri` | `jwks_uri` | Keys for `private_key_jwt`. |
 | `redeem_client.audience` | the redeem URL as received | Expected assertion `aud`, if a proxy changes the URL. |
 
+Only access tokens are accepted (Keycloak's `typ` claim `Bearer`, or `DPoP`
+when bound; initial and refreshed alike): ID and logout tokens signed with the
+same realm keys are rejected whatever the `audience` setting. Refresh tokens
+go to Keycloak's token endpoint, never to the plugin; one presented to the
+plugin fails signature verification, since Keycloak signs refresh tokens with
+the realm's internal HMAC key, which the JWKS does not publish.
+
 Keep the Nonce Endpoint enabled (`enable_nonce_endpoint`, the default),
 because Keycloak does not return `c_nonce`.
 
@@ -434,9 +441,18 @@ The wallet script ([`e2e/test_wallet.py`](e2e/test_wallet.py)):
    - after the controller triggers `credential-refresh`, the rotated refresh
      token gets a new access token and the refreshed credential;
    - reusing a rotated refresh token is rejected;
-7. checks that the DPoP-bound token is rejected when sent as a `Bearer`
-   token, that the public port has no redeem endpoint, and that the admin
-   redeem endpoint rejects calls without Keycloak's client authentication.
+7. checks that a refresh token is rejected as an access token, that the
+   DPoP-bound token is rejected when sent as a `Bearer` token, that the
+   public port has no redeem endpoint, and that the admin redeem endpoint
+   rejects calls without Keycloak's client authentication.
+
+To run the same flow with DPoP off (realm, wallet client and plugin are
+switched first; Bearer tokens, and refresh tokens bound to the attested
+instance key only):
+
+```bash
+E2E_DPOP=false docker compose run --rm wallet
+```
 
 The Keycloak admin console is at <http://localhost:8180> (`admin` / `admin`).
 

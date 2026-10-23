@@ -65,7 +65,8 @@ COPY docker/*.yml ./
 COPY --from=base /usr/src/app/isomdl-uniffi/python/isomdl_uniffi /usr/src/app/mso_mdoc/isomdl
 ENV PYTHONPATH="/usr/src/app/mso_mdoc/isomdl:$PYTHONPATH"
 RUN if [ "$TARGETARCH" = "amd64" ]; then \
-        pip install --no-cache-dir "https://github.com/Indicio-tech/isomdl-uniffi/releases/download/${ISOMDL_VERSION}/isomdl_uniffi-0.1.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"; \
+        wheel_version="${ISOMDL_VERSION#v}"; wheel_version="${wheel_version%%-*}"; \
+        pip install --no-cache-dir "https://github.com/Indicio-tech/isomdl-uniffi/releases/download/${ISOMDL_VERSION}/isomdl_uniffi-${wheel_version}-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"; \
     elif [ "$TARGETARCH" != "arm64" ]; then \
         echo "Unsupported architecture: $TARGETARCH"; \
         exit 1; \

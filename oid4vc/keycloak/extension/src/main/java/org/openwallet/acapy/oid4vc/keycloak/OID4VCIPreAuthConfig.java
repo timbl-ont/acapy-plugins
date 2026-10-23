@@ -1,14 +1,19 @@
 package org.openwallet.acapy.oid4vc.keycloak;
 
 import java.net.URI;
+import java.net.URISyntaxException;
 
 import org.keycloak.models.RealmModel;
+
+import org.jboss.logging.Logger;
 
 /**
  * Per-realm configuration, read from realm attributes so each realm (one per
  * issuer tenant) can point at its own plugin instance.
  */
 final class OID4VCIPreAuthConfig {
+
+    private static final Logger LOGGER = Logger.getLogger(OID4VCIPreAuthConfig.class);
 
     /**
      * Plugin redeem endpoint on its admin API (required), e.g.
@@ -69,8 +74,7 @@ final class OID4VCIPreAuthConfig {
     final int refreshTokenLifespan;
 
     private OID4VCIPreAuthConfig(RealmModel realm) {
-        String redeem = realm.getAttribute(REDEEM_URL);
-        this.redeemUrl = redeem == null || redeem.isBlank() ? null : URI.create(redeem.trim());
+        this.redeemUrl = httpUrl(realm, realm.getAttribute(REDEEM_URL));
         this.redeemClientAuth = orDefault(realm.getAttribute(REDEEM_CLIENT_AUTH), "private_key_jwt");
         this.redeemClientId = trimToNull(realm.getAttribute(REDEEM_CLIENT_ID));
         this.redeemClientSecret = trimToNull(realm.getAttribute(REDEEM_CLIENT_SECRET));
@@ -91,6 +95,26 @@ final class OID4VCIPreAuthConfig {
 
     boolean isComplete() {
         return redeemUrl != null && credentialIssuer != null;
+    }
+
+    /** An absolute http(s) URL, or null (logged) when the attribute is unusable. */
+    private static URI httpUrl(RealmModel realm, String value) {
+        String trimmed = trimToNull(value);
+        if (trimmed == null) {
+            return null;
+        }
+        try {
+            URI uri = new URI(trimmed);
+            String scheme = uri.getScheme();
+            if (uri.getHost() == null || !("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))) {
+                throw new URISyntaxException(trimmed, "not an absolute http(s) URL");
+            }
+            return uri;
+        } catch (URISyntaxException e) {
+            LOGGER.warnf("Realm '%s': ignoring invalid %s '%s': %s", realm.getName(), REDEEM_URL, trimmed,
+                    e.getReason());
+            return null;
+        }
     }
 
     private static String trimToNull(String value) {

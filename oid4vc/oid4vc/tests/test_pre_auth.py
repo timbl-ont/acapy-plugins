@@ -4,7 +4,11 @@ import pytest
 
 from oid4vc import pre_auth
 from oid4vc.models.exchange import OID4VCIExchangeRecord
-from oid4vc.pre_auth import PreAuthCodeError, redeem_pre_auth_code
+from oid4vc.pre_auth import (
+    PreAuthCodeError,
+    lookup_pre_auth_code,
+    redeem_pre_auth_code,
+)
 
 
 async def _record(profile, code="code-1", pin=None, state=None):
@@ -107,3 +111,35 @@ async def test_tx_code_correct_after_failures(profile):
         await redeem_pre_auth_code(profile, "code-1", "000000")
     record = await redeem_pre_auth_code(profile, "code-1", "123456")
     assert record.code_redeemed_at
+
+
+@pytest.mark.asyncio
+async def test_lookup_does_not_redeem(profile):
+    record = await _record(profile)
+    found = await lookup_pre_auth_code(profile, "code-1")
+    assert found.exchange_id == record.exchange_id
+    assert (await _reload(profile, record)).code_redeemed_at is None
+    with pytest.raises(PreAuthCodeError) as exc:
+        await lookup_pre_auth_code(profile, "nope")
+    assert exc.value.error == "invalid_grant"
+    with pytest.raises(PreAuthCodeError) as exc:
+        await lookup_pre_auth_code(profile, None)
+    assert exc.value.error == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_finalize_is_stored_with_the_redemption(profile):
+    record = await _record(profile, pin="1234")
+
+    def store(rec):
+        rec.token = "tok"
+
+    # A rejected tx_code never reaches finalize; nothing is stored.
+    with pytest.raises(PreAuthCodeError):
+        await redeem_pre_auth_code(profile, "code-1", "0000", finalize=store)
+    reloaded = await _reload(profile, record)
+    assert reloaded.token is None and reloaded.code_redeemed_at is None
+
+    await redeem_pre_auth_code(profile, "code-1", "1234", finalize=store)
+    reloaded = await _reload(profile, record)
+    assert reloaded.token == "tok" and reloaded.code_redeemed_at

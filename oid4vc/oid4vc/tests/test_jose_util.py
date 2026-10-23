@@ -115,3 +115,53 @@ def test_thumbprint_rfc7638_example():
         "kid": "2011-04-29",
     }
     assert jwk_thumbprint(jwk) == "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
+
+
+def test_replay_cache_detects_replay_and_stays_bounded():
+    from oid4vc.jose_util import ReplayCache
+
+    cache = ReplayCache(max_entries=3, min_prune_interval=0)
+    future = time.time() + 60
+    assert cache.check_and_add("a", future)
+    assert not cache.check_and_add("a", future)  # replay
+    assert cache.check_and_add("expired", time.time() - 1)
+    assert cache.check_and_add("expired", future)  # expired entries can be reused
+    assert cache.check_and_add("b", future)
+    # Full of live entries: the oldest is evicted, the cache never grows past the bound.
+    assert cache.check_and_add("c", future)
+    assert len(cache._seen) <= 3
+    assert "a" not in cache._seen
+    assert not cache.check_and_add("c", future)
+
+
+@pytest.mark.asyncio
+async def test_jwks_cache_refetches_once_for_an_unknown_kid():
+    from oid4vc.jose_util import JWKSCache
+
+    cache = JWKSCache(ttl=300, min_refresh_interval=10)
+    fetches = 0
+
+    async def fetch(jwks_uri):
+        nonlocal fetches
+        fetches += 1
+        keys = [{"kid": "k1", "kty": "RSA", "use": "sig"}]
+        cache._entries[jwks_uri] = (time.monotonic(), keys)
+        return keys
+
+    cache._fetch = fetch
+
+    # Expired entry: one fetch, not a second one for the unknown kid.
+    cache._entries["u"] = (time.monotonic() - 1000, [])
+    with pytest.raises(JoseError, match="no matching key"):
+        await cache.get_key("u", "unknown", None)
+    assert fetches == 1
+
+    # Live entry older than the refresh interval: refetched once for an unknown kid.
+    cache._entries["u"] = (time.monotonic() - 20, [])
+    with pytest.raises(JoseError, match="no matching key"):
+        await cache.get_key("u", "unknown", None)
+    assert fetches == 2
+
+    # Known kid in a live entry: served from the cache.
+    assert (await cache.get_key("u", "k1", None))["kid"] == "k1"
+    assert fetches == 2

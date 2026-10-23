@@ -13,9 +13,13 @@ A scripted wallet drives the whole flow against the compose stack:
    controller triggers a credential refresh, the rotated refresh token gets
    a new access token and the new credential; reusing a rotated refresh token
    is rejected;
-7. negative checks: the DPoP-bound token used as a Bearer token; the redeem
-   endpoint is absent from the public port and rejects unauthenticated calls
-   on the admin port.
+7. negative checks: a refresh token presented as an access token; the
+   DPoP-bound token used as a Bearer token; the redeem endpoint is absent
+   from the public port and rejects unauthenticated calls on the admin port.
+
+With E2E_DPOP=false the realm, the wallet client and the plugin are switched
+to DPoP off first, and the same flow runs with Bearer tokens: the refresh
+token is then bound to the attested instance key only.
 
 TEST ONLY: the attester key in attester-demo-key.json is public.
 """
@@ -36,6 +40,10 @@ from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 ADMIN_URL = os.environ.get("ADMIN_URL", "http://localhost:3001")
 CLIENT_ID = os.environ.get("CLIENT_ID", "demo-wallet")
+KEYCLOAK_URL = os.environ.get("KEYCLOAK_URL", "http://localhost:8180")
+REALM = "oid4vci"
+DPOP = os.environ.get("E2E_DPOP", "true").lower() != "false"
+TOKEN_TYPE = "DPoP" if DPOP else "Bearer"
 ATTESTER_ISS = "https://attester.demo.example"
 TX_CODE = "493536"
 PRE_AUTH_GRANT = "urn:ietf:params:oauth:grant-type:pre-authorized_code"
@@ -164,10 +172,63 @@ def admin(method: str, path: str, **kwargs) -> dict:
     return resp.json()
 
 
+def disable_dpop():
+    """Switch the realm, the wallet client and the plugin to DPoP off."""
+    step("Setup: DPoP off (realm, wallet client, plugin)")
+    token = requests.post(
+        f"{KEYCLOAK_URL}/realms/master/protocol/openid-connect/token",
+        data={
+            "grant_type": "password",
+            "client_id": "admin-cli",
+            "username": "admin",
+            "password": "admin",
+        },
+        timeout=10,
+    )
+    token.raise_for_status()
+    headers = {"Authorization": f"Bearer {token.json()['access_token']}"}
+    realm_url = f"{KEYCLOAK_URL}/admin/realms/{REALM}"
+
+    realm = requests.get(realm_url, headers=headers, timeout=10).json()
+    realm["attributes"]["oid4vci.require.dpop"] = "false"
+    requests.put(realm_url, json=realm, headers=headers, timeout=10).raise_for_status()
+
+    client = requests.get(
+        f"{realm_url}/clients",
+        params={"clientId": CLIENT_ID},
+        headers=headers,
+        timeout=10,
+    ).json()[0]
+    client["attributes"]["dpop.bound.access.tokens"] = "false"
+    requests.put(
+        f"{realm_url}/clients/{client['id']}", json=client, headers=headers, timeout=10
+    ).raise_for_status()
+    print("realm oid4vci.require.dpop=false, client dpop.bound.access.tokens=false")
+
+
+def dpop_headers(key, htm: str, htu: str, access_token: str | None = None) -> dict:
+    return {"DPoP": dpop_proof(key, htm, htu, access_token)} if DPOP else {}
+
+
 def create_offer() -> tuple[dict, str, dict]:
     step("Issuer controller: credential configuration + offer (tx_code required)")
     did = admin("POST", "/did/jwk/create", json={"key_type": "p256"})["did"]
-    admin("PUT", "/oid4vci/issuer/configuration", json={})
+    # The plugin-level OID4VCI_AUTH_SERVER requires DPoP; with DPoP off the
+    # base wallet's IssuerConfiguration overrides it.
+    issuer_config = (
+        {}
+        if DPOP
+        else {
+            "authorization_servers": [
+                {
+                    "type": "keycloak",
+                    "public_url": f"http://keycloak:8080/realms/{REALM}",
+                    "require_dpop": False,
+                }
+            ]
+        }
+    )
+    admin("PUT", "/oid4vci/issuer/configuration", json=issuer_config)
     config_id = f"DemoCredential-{uuid.uuid4().hex[:8]}"
     supported = admin(
         "POST",
@@ -205,6 +266,9 @@ def jwt_claims(token: str) -> dict:
 
 
 def main():
+    print(f"DPoP: {'on' if DPOP else 'off'}")
+    if not DPOP:
+        disable_dpop()
     offer, config_id, exchange_body = create_offer()
     code = offer["grants"][PRE_AUTH_GRANT]["pre-authorized_code"]
     issuer = offer["credential_issuer"]
@@ -237,7 +301,7 @@ def main():
         requests.post(
             token_endpoint,
             data=form,
-            headers={"DPoP": dpop_proof(wallet.dpop_key, "POST", token_endpoint)},
+            headers=dpop_headers(wallet.dpop_key, "POST", token_endpoint),
             timeout=10,
         ),
         (400, 401),
@@ -251,7 +315,7 @@ def main():
             data={**form, "tx_code": "000000"},
             headers={
                 **wallet.attestation_headers(as_meta["issuer"]),
-                "DPoP": dpop_proof(wallet.dpop_key, "POST", token_endpoint),
+                **dpop_headers(wallet.dpop_key, "POST", token_endpoint),
             },
             timeout=10,
         ),
@@ -260,14 +324,14 @@ def main():
         error="invalid_grant",
     )
 
-    step("Token request: wallet attestation + DPoP + tx_code")
+    step(f"Token request: wallet attestation{' + DPoP' if DPOP else ''} + tx_code")
     token = expect(
         requests.post(
             token_endpoint,
             data=form,
             headers={
                 **wallet.attestation_headers(as_meta["issuer"]),
-                "DPoP": dpop_proof(wallet.dpop_key, "POST", token_endpoint),
+                **dpop_headers(wallet.dpop_key, "POST", token_endpoint),
             },
             timeout=10,
         ),
@@ -275,7 +339,7 @@ def main():
         "access token",
     )
     access_token = token["access_token"]
-    assert token["token_type"] == "DPoP", token["token_type"]
+    assert token["token_type"] == TOKEN_TYPE, token["token_type"]
     claims = jwt_claims(access_token)
     print("access token claims:", json.dumps(claims, indent=2))
     refresh_token = token.get("refresh_token")
@@ -295,8 +359,8 @@ def main():
             cred_endpoint,
             json={"credential_configuration_id": config_id, "proofs": {"jwt": [proof]}},
             headers={
-                "Authorization": f"DPoP {at}",
-                "DPoP": dpop_proof(wallet.dpop_key, "POST", cred_endpoint, at),
+                "Authorization": f"{TOKEN_TYPE} {at}",
+                **dpop_headers(wallet.dpop_key, "POST", cred_endpoint, at),
             },
             timeout=30,
         )
@@ -314,12 +378,12 @@ def main():
                 # Keycloak binds the refresh token to the attested instance key.
                 # (For public clients it is bound to the DPoP key instead.)
                 **instance.attestation_headers(as_meta["issuer"]),
-                "DPoP": dpop_proof(instance.dpop_key, "POST", token_endpoint),
+                **dpop_headers(instance.dpop_key, "POST", token_endpoint),
             },
             timeout=10,
         )
 
-    step("Nonce + credential request (DPoP-bound token)")
+    step(f"Nonce + credential request ({TOKEN_TYPE} token)")
     credential = expect(request_credential(access_token), 200, "credential")
     print("credential:", credential["credentials"][0]["credential"][:120], "...")
 
@@ -333,7 +397,7 @@ def main():
 
     step("Refresh while no new credential is offered")
     refreshed = expect(refresh(refresh_token), 200, "refreshed token")
-    assert refreshed["token_type"] == "DPoP", refreshed["token_type"]
+    assert refreshed["token_type"] == TOKEN_TYPE, refreshed["token_type"]
     refreshed_claims = jwt_claims(refreshed["access_token"])
     assert refreshed_claims["refresh_id"] == claims["refresh_id"], refreshed_claims
     assert refreshed["refresh_token"] != refresh_token, "refresh token not rotated"
@@ -365,17 +429,36 @@ def main():
         error="invalid_grant",
     )
 
-    step("Negative: DPoP-bound token presented as Bearer")
+    step("Negative: refresh token presented as an access token")
+    current_refresh_token = rotated["refresh_token"]
     expect(
         requests.post(
             cred_endpoint,
             json={"credential_configuration_id": config_id},
-            headers={"Authorization": f"Bearer {access_token}"},
+            headers={
+                "Authorization": f"{TOKEN_TYPE} {current_refresh_token}",
+                **dpop_headers(
+                    wallet.dpop_key, "POST", cred_endpoint, current_refresh_token
+                ),
+            },
             timeout=10,
         ),
         401,
         "rejected",
     )
+
+    if DPOP:
+        step("Negative: DPoP-bound token presented as Bearer")
+        expect(
+            requests.post(
+                cred_endpoint,
+                json={"credential_configuration_id": config_id},
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10,
+            ),
+            401,
+            "rejected",
+        )
 
     step("Negative: redeem endpoint (trusted back channel)")
     expect(

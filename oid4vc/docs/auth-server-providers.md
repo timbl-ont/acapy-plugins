@@ -30,7 +30,7 @@ Each provider covers these parts of the flow:
 
 | Hook | Used by |
 |---|---|
-| `create_pre_authorized_code` | `routes/helpers.py` `_create_pre_auth_code` (offer creation) |
+| `create_pre_authorized_code` | `routes/helpers.py` `_parse_cred_offer` (offer creation) |
 | `validate_access_token` | `public_routes/token.py` `check_token` |
 | `exchange_key` | `check_token` → `AccessTokenResult.exchange_key` → `/credential` |
 | `require_dpop` | `check_token` |

@@ -115,7 +115,9 @@ class Config:
 
             return re.sub(r"\$\{([^}]+)\}", replacer, text)
 
-        endpoint = expand_vars(endpoint)
+        # The endpoint is the Credential Issuer Identifier and the base of
+        # every public URL ({endpoint}/tenant/{id}/credential): no trailing slash.
+        endpoint = expand_vars(endpoint).rstrip("/")
 
         return cls(
             host,

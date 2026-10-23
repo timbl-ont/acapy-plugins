@@ -42,6 +42,8 @@ def test_htu_normalization():
     "kwargs, verify_kwargs, message",
     [
         ({"htu": "https://other.example/credential"}, {}, "htu"),
+        ({"htu": "https://issuer.example:abc/credential"}, {}, "htu"),
+        ({"htu": "https://[::1/credential"}, {}, "htu"),
         ({"htm": "GET"}, {}, "htm"),
         ({"iat": int(time.time()) - 3600}, {}, "iat"),
         ({"iat": int(time.time()) + 3600}, {}, "iat"),
@@ -56,6 +58,15 @@ def test_invalid_proofs(kwargs, verify_kwargs, message):
     with pytest.raises(DPoPError) as exc:
         verify_dpop_proof(dpop_proof(key, **kwargs), htm="POST", htu=HTU, **verify_kwargs)
     assert message in exc.value.description
+
+
+def test_any_of_several_htus_is_accepted():
+    key = ec_key()
+    published = "https://issuer.example.com/custom-credential"
+    proof = dpop_proof(key, htu=published)
+    verify_dpop_proof(proof, htm="POST", htu=[HTU, published])
+    with pytest.raises(DPoPError, match="htu"):
+        verify_dpop_proof(dpop_proof(key, htu=published), htm="POST", htu=[HTU])
 
 
 def test_missing_proof():

@@ -10,6 +10,7 @@ Not implemented: server-provided ``DPoP-Nonce`` (RFC 9449 §8/§9).
 import base64
 import hashlib
 import time
+from typing import Iterable
 from urllib.parse import urlsplit, urlunsplit
 
 from .jose_util import (
@@ -72,7 +73,7 @@ def verify_dpop_proof(
     proof: str | None,
     *,
     htm: str,
-    htu: str,
+    htu: str | Iterable[str],
     access_token: str | None = None,
     expected_jkt: str | None = None,
     max_age: int = DEFAULT_MAX_AGE,
@@ -83,7 +84,8 @@ def verify_dpop_proof(
     Args:
         proof: value of the ``DPoP`` request header
         htm: HTTP method of the request
-        htu: the public URL of the request (as the client addressed it)
+        htu: the public URL of the request (as the client addressed it), or
+            the acceptable URLs when the request can be reached under several
         access_token: when presenting a token to a resource server, the token;
             ``ath`` is then required and checked
         expected_jkt: ``cnf.jkt`` of the access token, if bound
@@ -131,7 +133,14 @@ def verify_dpop_proof(
     if payload.get("htm") != htm.upper():
         raise DPoPError("DPoP proof htm does not match the request method")
     proof_htu = payload.get("htu")
-    if not isinstance(proof_htu, str) or normalize_htu(proof_htu) != normalize_htu(htu):
+    accepted = [htu] if isinstance(htu, str) else list(htu)
+    try:
+        htu_matches = isinstance(proof_htu, str) and normalize_htu(proof_htu) in {
+            normalize_htu(url) for url in accepted
+        }
+    except ValueError:  # the proof's htu is not a parsable URL
+        htu_matches = False
+    if not htu_matches:
         raise DPoPError("DPoP proof htu does not match the request URL")
     iat = payload.get("iat")
     now = time.time()

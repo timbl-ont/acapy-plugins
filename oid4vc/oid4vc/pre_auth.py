@@ -15,8 +15,9 @@ the back-channel redeem endpoint. Either way the same checks apply:
 
 import hmac
 import logging
+from typing import Callable
 
-from acapy_agent.core.profile import Profile
+from acapy_agent.core.profile import Profile, ProfileSession
 from acapy_agent.messaging.models.base import BaseModelError
 from acapy_agent.messaging.util import datetime_now, datetime_to_str
 from acapy_agent.storage.error import StorageError
@@ -41,29 +42,54 @@ def _tx_code_matches(supplied: str, expected: str) -> bool:
     return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
 
 
-async def redeem_pre_auth_code(
-    profile: Profile, code: str | None, tx_code: str | None
+async def _retrieve(
+    session: ProfileSession, code: str | None, *, for_update: bool
 ) -> OID4VCIExchangeRecord:
-    """Validate and atomically redeem a pre-authorized code.
-
-    Returns the exchange record on success; raises ``PreAuthCodeError``.
-    """
     if not code or not isinstance(code, str):
         raise PreAuthCodeError(
             "invalid_request", "pre-authorized_code is missing or invalid"
         )
+    try:
+        return await OID4VCIExchangeRecord.retrieve_by_code(
+            session, code, for_update=for_update
+        )
+    except (StorageError, BaseModelError) as err:
+        # StorageNotFoundError / StorageDuplicateError are StorageErrors.
+        raise PreAuthCodeError("invalid_grant", "pre-authorized code is invalid") from err
+
+
+async def lookup_pre_auth_code(
+    profile: Profile, code: str | None
+) -> OID4VCIExchangeRecord:
+    """Return the exchange a pre-authorized code belongs to, without redeeming it.
+
+    Lets a caller prepare what it needs before ``redeem_pre_auth_code`` (the
+    built-in token endpoint signs the access token first, so a signing failure
+    doesn't consume the code). Raises ``PreAuthCodeError`` for unknown codes.
+    """
+    async with profile.session() as session:
+        return await _retrieve(session, code, for_update=False)
+
+
+async def redeem_pre_auth_code(
+    profile: Profile,
+    code: str | None,
+    tx_code: str | None,
+    *,
+    finalize: Callable[[OID4VCIExchangeRecord], None] | None = None,
+) -> OID4VCIExchangeRecord:
+    """Validate and atomically redeem a pre-authorized code.
+
+    ``finalize`` may set further fields on the record (e.g. the issued token);
+    it runs in the redemption transaction, so they are stored together with
+    the redemption or not at all. It must not do I/O.
+
+    Returns the exchange record on success; raises ``PreAuthCodeError``.
+    """
     max_attempts = Config.from_settings(profile.settings).max_tx_code_attempts
 
     async with profile.transaction() as txn:
-        try:
-            record = await OID4VCIExchangeRecord.retrieve_by_code(
-                txn, code, for_update=True
-            )
-        except (StorageError, BaseModelError) as err:
-            # StorageNotFoundError / StorageDuplicateError are StorageErrors.
-            raise PreAuthCodeError(
-                "invalid_grant", "pre-authorized code is invalid"
-            ) from err
+        record = await _retrieve(txn, code, for_update=True)
 
         if record.state not in (
             OID4VCIExchangeRecord.STATE_CREATED,
@@ -99,6 +125,8 @@ async def redeem_pre_auth_code(
                 raise PreAuthCodeError("invalid_grant", "tx_code is invalid")
 
         record.code_redeemed_at = datetime_to_str(datetime_now())
+        if finalize is not None:
+            finalize(record)
         await record.save(txn, reason="Pre-authorized code redeemed")
         await txn.commit()
 

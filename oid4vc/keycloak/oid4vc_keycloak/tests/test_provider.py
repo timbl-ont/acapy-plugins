@@ -44,25 +44,30 @@ def ctx():
     )
 
 
-def _token(key, typ="JWT", **claims):
+def _token(key, header_typ="JWT", **claims):
     payload = {
         "iss": REALM,
         "aud": [ISSUER, "account"],
         "exp": int(time.time()) + 60,
         "iat": int(time.time()),
         "sub": "generic-holder",
+        "typ": "DPoP",
         "refresh_id": "refresh-1",
         "cnf": {"jkt": "thumb"},
         **claims,
     }
     payload = {k: v for k, v in payload.items() if v is not None}
-    return sign({"typ": typ, "kid": "realm-1"}, payload, key, "RS256")
+    return sign({"typ": header_typ, "kid": "realm-1"}, payload, key, "RS256")
 
 
 @pytest.mark.asyncio
 async def test_valid_access_token(provider, ctx, realm_key):
     result = await provider.validate_access_token(ctx, _token(realm_key))
     assert result.verified
+    # Unbound access tokens (DPoP off), including Keycloak's lower-case variant.
+    for typ in ("Bearer", "bearer"):
+        unbound = await provider.validate_access_token(ctx, _token(realm_key, typ=typ))
+        assert unbound.verified
     assert provider.exchange_key(ctx, result.payload) == "refresh-1"
     assert provider.require_dpop(ctx)
     assert provider.authorization_servers(ctx) == [REALM]
@@ -76,6 +81,11 @@ async def test_valid_access_token(provider, ctx, realm_key):
         {"aud": "https://other-issuer.example"},
         {"exp": int(time.time()) - 3600},
         {"refresh_id": None},
+        # Realm-signed JWTs that are not access tokens (refresh token, no typ)
+        {"typ": "Refresh", "aud": ISSUER},
+        {"typ": "Offline", "aud": ISSUER},
+        {"typ": "ID", "aud": ISSUER},
+        {"typ": None},
     ],
 )
 async def test_rejected_access_tokens(provider, ctx, realm_key, claims):

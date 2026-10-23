@@ -86,7 +86,7 @@ async def _target_profile(
     ``{endpoint}`` is the base wallet; ``{endpoint}/tenant/{wallet_id}`` a tenant.
     """
     root = context.root_profile or context.profile
-    endpoint = Config.from_settings(root.settings).endpoint.rstrip("/")
+    endpoint = Config.from_settings(root.settings).endpoint
     if credential_issuer.rstrip("/") == endpoint:
         return root
 

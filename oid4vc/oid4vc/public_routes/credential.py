@@ -107,10 +107,9 @@ async def issue_cred(request: web.Request):
         request.headers.get("Authorization"),
         dpop_proof=request.headers.get(DPOP_HEADER),
         htu=public_request_url(Config.from_settings(context.settings), request),
+        published_endpoint="credential_endpoint",
     )
-    refresh_id = getattr(token_result, "exchange_key", None) or token_result.payload.get(
-        "sub"
-    )
+    refresh_id = token_result.exchange_key
     req_body = await request.json()
     LOGGER.info("request: %s", req_body)
 

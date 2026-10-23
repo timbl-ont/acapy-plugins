@@ -12,9 +12,13 @@ from acapy_agent.wallet.key_type import ED25519
 from aiohttp import web
 
 from oid4vc import public_routes as test_module
+from oid4vc.jose_util import jwk_thumbprint
 from oid4vc.models.exchange import OID4VCIExchangeRecord
 from oid4vc.models.issuer_config import IssuerConfiguration
 from oid4vc.models.supported_cred import SupportedCredential
+from oid4vc.utils import get_wallet_id
+
+from ..jose_helpers import dpop_proof, ec_key, public_jwk
 from oid4vc.public_routes import (
     JWTVerifyResult,
     check_token,
@@ -517,6 +521,65 @@ async def test_check_token_dpop_bound_requires_dpop_scheme(
     with pytest.raises(web.HTTPUnauthorized) as exc:
         await check_token(context, "DPoP sometoken", dpop_proof=None)
     assert "invalid_dpop_proof" in exc.value.text
+
+
+@pytest.mark.asyncio
+async def test_check_token_requires_exchange_key(
+    monkeypatch, context, builtin_issuer_key
+):
+    monkeypatch.setattr(
+        _builtin_module,
+        "jwt_verify",
+        AsyncMock(
+            return_value=JWTVerifyResult(
+                headers={"kid": _ISSUER_KID}, payload={"exp": 9999999999}, verified=True
+            )
+        ),
+    )
+    with pytest.raises(web.HTTPUnauthorized) as exc:
+        await check_token(context, "Bearer sometoken")
+    assert "credential exchange" in exc.value.text
+
+
+@pytest.mark.asyncio
+async def test_check_token_accepts_published_endpoint_as_htu(
+    monkeypatch, context, builtin_issuer_key
+):
+    """A tenant that overrides credential_endpoint gets proofs for that URL."""
+    key = ec_key()
+    monkeypatch.setattr(
+        _builtin_module,
+        "jwt_verify",
+        AsyncMock(
+            return_value=JWTVerifyResult(
+                headers={"kid": _ISSUER_KID},
+                payload={
+                    "exp": 9999999999,
+                    "sub": "r",
+                    "cnf": {"jkt": jwk_thumbprint(public_jwk(key))},
+                },
+                verified=True,
+            )
+        ),
+    )
+    published = "https://issuer.example.com/custom-credential"
+    kwargs = {
+        "dpop_proof": dpop_proof(key, htu=published, access_token="tok"),
+        "htu": "http://localhost:8020/credential",
+        "published_endpoint": "credential_endpoint",
+    }
+    with pytest.raises(web.HTTPUnauthorized) as exc:
+        await check_token(context, "DPoP tok", **kwargs)
+    assert "htu" in exc.value.text
+
+    async with context.profile.session() as session:
+        await IssuerConfiguration(
+            configuration_id=get_wallet_id(context.profile),
+            new_with_id=True,
+            credential_endpoint=published,
+        ).save(session)
+    result = await check_token(context, "DPoP tok", **kwargs)
+    assert result.exchange_key == "r"
 
 
 @pytest.mark.asyncio

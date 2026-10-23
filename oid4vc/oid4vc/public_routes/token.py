@@ -29,15 +29,17 @@ from oid4vc.jwt import (
 from ..auth_providers import (
     AccessTokenResult,
     InvalidTokenError,
+    auth_provider_for_entry,
     resolve_auth_provider,
 )
 from ..config import Config
 from ..dpop import DPOP_HEADER, DPoPError, verify_dpop_proof
+from ..models.exchange import OID4VCIExchangeRecord
 from ..models.nonce import Nonce
 from ..oauth_errors import oauth_error, oauth_error_response
 from ..pop_result import PopResult
-from ..pre_auth import PreAuthCodeError, redeem_pre_auth_code
-from ..utils import public_request_url
+from ..pre_auth import PreAuthCodeError, lookup_pre_auth_code, redeem_pre_auth_code
+from ..utils import first_auth_server, get_issuer_configuration, public_request_url
 from .constants import (
     EXPIRES_IN,
     LOGGER,
@@ -123,12 +125,16 @@ async def token(request: web.Request):
         "pre_authorized_code"
     )
     tx_code = form.get("tx_code") or form.get("user_pin")
+    if not isinstance(pre_authorized_code, str):
+        pre_authorized_code = None
+    if not isinstance(tx_code, str):
+        tx_code = None
+
+    # The token is signed before the code is redeemed, so a signing failure
+    # doesn't consume the code; it is stored and returned only once the code
+    # (and tx_code) are accepted, in the redemption transaction.
     try:
-        record = await redeem_pre_auth_code(
-            context.profile,
-            pre_authorized_code if isinstance(pre_authorized_code, str) else None,
-            tx_code if isinstance(tx_code, str) else None,
-        )
+        record = await lookup_pre_auth_code(context.profile, pre_authorized_code)
     except PreAuthCodeError as err:
         return oauth_error_response(err.error, err.description)
 
@@ -141,25 +147,19 @@ async def token(request: web.Request):
 
     # v1 compliance: do not require DID/verification method at token step.
     # Sign with a default did:jwk under this wallet to produce a JWT access token.
-    async with context.profile.session() as session:
-        try:
+    try:
+        async with context.profile.session() as session:
             jwk_info = await retrieve_or_create_did_jwk(session)
-            vm = f"{jwk_info.did}#0"
-            token_jwt = await jwt_sign(
-                context.profile,
-                headers={"kid": vm, "typ": "JWT"},
-                payload=payload,
-                verification_method=vm,
-            )
-        except (WalletNotFoundError, WalletError, ValueError) as err:
-            return oauth_error_response(
-                "server_error", f"Unable to sign access token: {str(err)}", 500
-            )
-
-        record.token = token_jwt
-        await record.save(
-            session,
-            reason="Created new token",
+        vm = f"{jwk_info.did}#0"
+        token_jwt = await jwt_sign(
+            context.profile,
+            headers={"kid": vm, "typ": "JWT"},
+            payload=payload,
+            verification_method=vm,
+        )
+    except (WalletNotFoundError, WalletError, ValueError) as err:
+        return oauth_error_response(
+            "server_error", f"Unable to sign access token: {str(err)}", 500
         )
 
     # Nonce handling per OID4VCI 1.0:
@@ -169,16 +169,26 @@ async def token(request: web.Request):
     #   - enable_nonce_endpoint=False: no Nonce Endpoint is published, so we
     #     fall back to the legacy flow — return c_nonce in the token response
     #     and store it on the exchange record for later comparison.
+    c_nonce_value = None if config.enable_nonce_endpoint else token_urlsafe(NONCE_BYTES)
+
+    def store_token(redeemed: OID4VCIExchangeRecord) -> None:
+        redeemed.token = token_jwt
+        if c_nonce_value:
+            redeemed.nonce = c_nonce_value
+
+    try:
+        await redeem_pre_auth_code(
+            context.profile, pre_authorized_code, tx_code, finalize=store_token
+        )
+    except PreAuthCodeError as err:
+        return oauth_error_response(err.error, err.description)
+
     response: Dict[str, Any] = {
-        "access_token": record.token,
+        "access_token": token_jwt,
         "token_type": "DPoP" if jkt else "Bearer",
         "expires_in": EXPIRES_IN,
     }
-    if not config.enable_nonce_endpoint:
-        c_nonce_value = token_urlsafe(NONCE_BYTES)
-        async with context.profile.session() as session:
-            record.nonce = c_nonce_value
-            await record.save(session, reason="Stored c_nonce for PoP validation")
+    if c_nonce_value:
         response["c_nonce"] = c_nonce_value
         response["c_nonce_expires_in"] = EXPIRES_IN
 
@@ -194,6 +204,7 @@ async def check_token(
     dpop_proof: str | None = None,
     htu: str | None = None,
     htm: str = "POST",
+    published_endpoint: str | None = None,
 ) -> AccessTokenResult:
     """Validate an access token presented to the issuer (resource server).
 
@@ -203,6 +214,12 @@ async def check_token(
     - a token bound with ``cnf.jkt`` must use the ``DPoP`` scheme and come
       with a valid proof (``htm``/``htu``/``ath``, key matching ``cnf.jkt``);
     - providers that require DPoP reject unbound tokens.
+
+    ``htu`` is the request URL as this server knows it. ``published_endpoint``
+    names the ``IssuerConfiguration`` endpoint (``credential_endpoint``,
+    ``notification_endpoint``) whose configured value, when the tenant
+    overrides it, is also accepted as the proof's ``htu``: that is the URL the
+    wallet was told to use.
 
     Unbound tokens presented with the ``DPoP`` scheme are accepted for
     compatibility with wallets that always use it.
@@ -219,7 +236,8 @@ async def check_token(
 
     profile = context.profile
     async with profile.session() as session:
-        provider, ctx = await resolve_auth_provider(session, profile)
+        issuer_config = await get_issuer_configuration(session, profile)
+    provider, ctx = auth_provider_for_entry(profile, first_auth_server(issuer_config))
 
     try:
         result = await provider.validate_access_token(ctx, cred)
@@ -238,11 +256,21 @@ async def check_token(
                 "DPoP-bound token must use the DPoP scheme",
                 www_authenticate="DPoP",
             )
-        if htu is None:
-            htu = f"{ctx.issuer_url}/credential"
+        accepted_htus = [htu or f"{ctx.issuer_url}/credential"]
+        published = (
+            getattr(issuer_config, published_endpoint, None)
+            if issuer_config and published_endpoint
+            else None
+        )
+        if published:
+            accepted_htus.append(published)
         try:
             verify_dpop_proof(
-                dpop_proof, htm=htm, htu=htu, access_token=cred, expected_jkt=jkt
+                dpop_proof,
+                htm=htm,
+                htu=accepted_htus,
+                access_token=cred,
+                expected_jkt=jkt,
             )
         except DPoPError as err:
             raise oauth_error(
@@ -256,11 +284,16 @@ async def check_token(
             www_authenticate="DPoP",
         )
 
+    exchange_key = provider.exchange_key(ctx, result.payload)
+    if not exchange_key:
+        raise oauth_error(
+            401,
+            "invalid_token",
+            "Token does not reference a credential exchange",
+            www_authenticate="Bearer",
+        )
     return AccessTokenResult(
-        result.headers,
-        result.payload,
-        True,
-        exchange_key=provider.exchange_key(ctx, result.payload),
+        result.headers, result.payload, True, exchange_key=exchange_key
     )
 
 

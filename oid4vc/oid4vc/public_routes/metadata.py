@@ -22,6 +22,7 @@ from ..did_utils import retrieve_or_create_did_jwk
 from ..jwt import jwt_sign
 from ..models.issuer_config import IssuerConfiguration
 from ..models.supported_cred import SupportedCredential
+from ..utils import first_auth_server
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,8 +43,7 @@ def _auth_provider(
     profile: Profile, issuer_config: IssuerConfiguration | None
 ) -> tuple[AuthServerProvider, AuthContext]:
     """Provider for the authorization server in use (the first configured entry)."""
-    servers = issuer_config.authorization_servers if issuer_config else None
-    return auth_provider_for_entry(profile, servers[0] if servers else None)
+    return auth_provider_for_entry(profile, first_auth_server(issuer_config))
 
 
 def _build_cred_configs(credentials_supported, processors) -> dict:
