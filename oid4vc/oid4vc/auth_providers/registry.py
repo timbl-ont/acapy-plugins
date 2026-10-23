@@ -11,7 +11,7 @@ pluggable providers and refer to the reference authorization server
 (``oid4vc/auth_server``).
 """
 
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Mapping, Tuple
 
 from acapy_agent.core.profile import Profile, ProfileSession
 
@@ -64,7 +64,7 @@ def default_registry() -> AuthServerRegistry:
     return registry
 
 
-def provider_type(entry: Optional[Mapping[str, Any]]) -> str:
+def provider_type(entry: Mapping[str, Any] | None) -> str:
     """Return the provider type named by an authorization server entry."""
     if not entry:
         return BUILTIN

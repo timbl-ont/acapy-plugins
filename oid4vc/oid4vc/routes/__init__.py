@@ -119,6 +119,7 @@ __all__ = [
     # Issuer configuration
     "get_issuer_configuration",
     "put_issuer_configuration",
+    "redeem_pre_auth_code_route",
     # Registration
     "register",
     "post_process_routes",

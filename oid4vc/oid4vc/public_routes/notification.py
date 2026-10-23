@@ -14,6 +14,7 @@ from marshmallow import fields
 from ..models.exchange import OID4VCIExchangeRecord
 from ..config import Config
 from ..dpop import DPOP_HEADER
+from ..oauth_errors import oauth_error
 from ..utils import public_request_url
 from .token import check_token
 
@@ -42,21 +43,6 @@ class NotificationSchema(OpenAPISchema):
     event_description = fields.Str(
         required=False, metadata={"description": "Human-readable ASCII [USASCII] text"}
     )
-
-
-def _notif_error(status: int, error: str, description: str) -> web.HTTPException:
-    """Return an HTTPException with a JSON body for notification errors.
-
-    OID4VCI 1.0 §11 notification errors use the same error code vocabulary as
-    the credential endpoint (§7.3).  Use 'invalid_credential_request' as the
-    catch-all for malformed notification requests.
-    """
-    body = json.dumps({"error": error, "error_description": description})
-    if status == 400:
-        return web.HTTPBadRequest(text=body, content_type="application/json")
-    if status == 401:
-        return web.HTTPUnauthorized(text=body, content_type="application/json")
-    return web.HTTPBadRequest(text=body, content_type="application/json")
 
 
 @docs(tags=["oid4vci"], summary="Send a notification to the user")
@@ -104,7 +90,7 @@ async def _receive_notification_inner(request: web.Request) -> web.Response:
     try:
         body = await request.json()
     except Exception as exc:
-        raise _notif_error(
+        raise oauth_error(
             400,
             "invalid_credential_request",
             "Request body must be valid JSON",
@@ -117,14 +103,14 @@ async def _receive_notification_inner(request: web.Request) -> web.Response:
     event = body.get("event")
     if not notification_id or not event:
         missing = [f for f in ("notification_id", "event") if not body.get(f)]
-        raise _notif_error(
+        raise oauth_error(
             400,
             "invalid_credential_request",
             f"Missing required field(s): {', '.join(missing)}",
         )
 
     if event not in _VALID_EVENTS:
-        raise _notif_error(
+        raise oauth_error(
             400,
             "invalid_credential_request",
             f"event must be one of: {', '.join(sorted(_VALID_EVENTS))}",
@@ -138,7 +124,7 @@ async def _receive_notification_inner(request: web.Request) -> web.Response:
                 session, notification_id
             )
             if not record:
-                raise _notif_error(
+                raise oauth_error(
                     400, "invalid_credential_request", "Unknown notification_id"
                 )
             if event == "credential_accepted":
@@ -152,6 +138,6 @@ async def _receive_notification_inner(request: web.Request) -> web.Response:
         except web.HTTPException:
             raise
         except (StorageError, BaseModelError, StorageNotFoundError) as err:
-            raise _notif_error(400, "invalid_credential_request", err.roll_up) from err
+            raise oauth_error(400, "invalid_credential_request", err.roll_up) from err
 
     return web.Response(status=204)

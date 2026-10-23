@@ -32,8 +32,10 @@ from acapy_agent.messaging.models.base import BaseModelError
 from acapy_agent.multitenant.base import BaseMultitenantManager
 from acapy_agent.storage.error import StorageError, StorageNotFoundError
 from acapy_agent.wallet.models.wallet_record import WalletRecord
+from acapy_agent.messaging.models.openapi import OpenAPISchema
 from aiohttp import web
-from aiohttp_apispec import docs
+from aiohttp_apispec import docs, form_schema, response_schema
+from marshmallow import fields
 
 from ..auth_providers import (
     AuthServerConfigError,
@@ -44,6 +46,7 @@ from ..auth_providers.client_auth import CREDENTIAL_ISSUER_CLAIM
 from ..config import Config
 from ..jose_util import JoseError, decode_jws
 from ..models.supported_cred import SupportedCredential
+from ..oauth_errors import oauth_error_response
 from ..pre_auth import PreAuthCodeError, redeem_pre_auth_code
 
 LOGGER = logging.getLogger(__name__)
@@ -51,14 +54,6 @@ LOGGER = logging.getLogger(__name__)
 # Suggested lifetime (seconds) of the access token the AS issues for a
 # redeemed code. Only needs to cover the nonce + credential requests.
 REDEEMED_TOKEN_LIFETIME = 300
-
-
-def _error(error: str, description: str, status: int = 400) -> web.Response:
-    return web.json_response(
-        {"error": error, "error_description": description},
-        status=status,
-        headers={"Cache-Control": "no-store"},
-    )
 
 
 class _UnknownTenant(Exception):
@@ -112,25 +107,89 @@ async def _target_profile(
     return await manager.get_wallet_profile(root.context, wallet)
 
 
+class PreAuthRedeemRequestSchema(OpenAPISchema):
+    """Form parameters of a redeem request.
+
+    All optional at the schema level so that missing values produce OAuth
+    errors from the handler (401 ``invalid_client`` / 400 ``invalid_request``)
+    rather than a 422 from request validation.
+    """
+
+    pre_authorized_code = fields.Str(
+        required=False, metadata={"description": "The pre-authorized code to redeem"}
+    )
+    tx_code = fields.Str(
+        required=False, metadata={"description": "Transaction code entered by the user"}
+    )
+    wallet_client_id = fields.Str(
+        required=False,
+        metadata={"description": "The wallet's client_id at the authorization server"},
+    )
+    credential_issuer = fields.Str(
+        required=False,
+        metadata={
+            "description": "Credential issuer (tenant) the caller acts for; required "
+            "with client_secret_post, otherwise taken from the client assertion",
+            "example": "https://issuer.example.com/tenant/<wallet_id>",
+        },
+    )
+    client_assertion_type = fields.Str(
+        required=False,
+        metadata={"example": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
+    )
+    client_assertion = fields.Str(
+        required=False,
+        metadata={"description": "private_key_jwt / client_secret_jwt client assertion"},
+    )
+    client_id = fields.Str(
+        required=False, metadata={"description": "client_secret_post client id"}
+    )
+    client_secret = fields.Str(
+        required=False, metadata={"description": "client_secret_post client secret"}
+    )
+
+
+class PreAuthRedeemResponseSchema(OpenAPISchema):
+    """Result of a successful redemption."""
+
+    refresh_id = fields.Str(
+        required=True,
+        metadata={"description": "Exchange reference to put in the access token"},
+    )
+    credential_configuration_ids = fields.List(
+        fields.Str(),
+        required=True,
+        metadata={"description": "Credential configurations the code grants"},
+    )
+    expires_in = fields.Int(
+        required=True,
+        metadata={"description": "Suggested access token lifetime in seconds"},
+    )
+
+
 @docs(
     tags=["oid4vci"],
     summary="Redeem a pre-authorized code (authorization server back channel)",
     description=(
         "Called by an external authorization server (e.g. Keycloak) to redeem a "
-        "plugin-issued pre-authorized code. Form parameters: pre_authorized_code, "
-        "tx_code, wallet_client_id, and client credentials (client_assertion_type + "
-        "client_assertion, or client_id + client_secret + credential_issuer). "
-        "Authenticated by the authorization server's configured client "
-        "authentication, not by admin credentials; the tenant is the one whose "
+        "plugin-issued pre-authorized code. Authenticated by the authorization "
+        "server's OAuth client authentication (client_assertion, or client_id + "
+        "client_secret), not by admin credentials; the tenant is the one whose "
         "credential issuer the authenticated caller names."
     ),
+    # Not protected by the admin API key / tenant token (see module docstring).
+    security=[],
 )
+@form_schema(PreAuthRedeemRequestSchema())
+@response_schema(PreAuthRedeemResponseSchema(), 200)
 async def redeem_pre_auth_code_route(request: web.Request) -> web.Response:
     """Redeem a pre-authorized code on behalf of the authorization server."""
     context: AdminRequestContext = request["context"]
     form = await request.post()
     params = {k: v for k, v in form.items() if isinstance(v, str)}
-    unauthenticated = _error("invalid_client", "client authentication failed", 401)
+    unauthenticated = oauth_error_response(
+        "invalid_client", "client authentication failed", 401
+    )
 
     credential_issuer = _claimed_credential_issuer(params)
     if not credential_issuer:
@@ -165,7 +224,7 @@ async def redeem_pre_auth_code_route(request: web.Request) -> web.Response:
     try:
         record = await redeem_pre_auth_code(profile, code, params.get("tx_code"))
     except PreAuthCodeError as err:
-        return _error(err.error, err.description)
+        return oauth_error_response(err.error, err.description)
 
     try:
         async with profile.session() as session:
@@ -174,7 +233,9 @@ async def redeem_pre_auth_code_route(request: web.Request) -> web.Response:
             )
     except (StorageError, BaseModelError):
         LOGGER.error("Supported credential for exchange %s missing", record.exchange_id)
-        return _error("server_error", "credential configuration not found", 500)
+        return oauth_error_response(
+            "server_error", "credential configuration not found", 500
+        )
 
     LOGGER.info(
         "Pre-authorized code for exchange %s redeemed (wallet client %s)",

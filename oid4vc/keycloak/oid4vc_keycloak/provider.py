@@ -29,7 +29,7 @@ Authorization server entry settings::
 """
 
 import logging
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
 from oid4vc.auth_providers import (
     AuthContext,
@@ -61,7 +61,7 @@ class KeycloakProvider(AuthServerProvider):
     type = "keycloak"
     supports_redeem = True
 
-    def __init__(self, jwks_cache: Optional[JWKSCache] = None):
+    def __init__(self, jwks_cache: JWKSCache | None = None):
         """Initialize the provider."""
         self._jwks = jwks_cache or JWKSCache()
         self._redeem_jtis = ReplayCache()
@@ -85,7 +85,7 @@ class KeycloakProvider(AuthServerProvider):
     async def _verify_realm_jwt(self, ctx: AuthContext, token: str):
         return await self._jwks.verify(self._jwks_uri(ctx), token)
 
-    def authorization_servers(self, ctx: AuthContext) -> Optional[list[str]]:
+    def authorization_servers(self, ctx: AuthContext) -> list[str] | None:
         """Advertise the realm as the authorization server."""
         return [self._public_url(ctx)]
 
@@ -93,7 +93,7 @@ class KeycloakProvider(AuthServerProvider):
         """DPoP-bound tokens are required unless disabled."""
         return bool(ctx.setting("require_dpop", True))
 
-    def exchange_key(self, ctx: AuthContext, payload: Mapping[str, Any]) -> Optional[str]:
+    def exchange_key(self, ctx: AuthContext, payload: Mapping[str, Any]) -> str | None:
         """The exchange is identified by a session-note claim, not ``sub``."""
         return payload.get(ctx.setting("refresh_id_claim", "refresh_id"))
 

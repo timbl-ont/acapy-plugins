@@ -24,7 +24,7 @@ parameters instead.
 import hmac
 import time
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import Mapping
 
 from ..jose_util import (
     JoseError,
@@ -56,9 +56,9 @@ class BackChannelClient:
 
     client_id: str
     auth_method: str = PRIVATE_KEY_JWT
-    client_secret: Optional[str] = None
-    jwks_uri: Optional[str] = None
-    audience: Optional[str] = None
+    client_secret: str | None = None
+    jwks_uri: str | None = None
+    audience: str | None = None
 
 
 async def authenticate_client(
@@ -68,7 +68,7 @@ async def authenticate_client(
     *,
     jwks_cache: JWKSCache,
     replay_cache: ReplayCache,
-    required_claims: Optional[Mapping[str, str]] = None,
+    required_claims: Mapping[str, str] | None = None,
 ) -> None:
     """Authenticate a back-channel request; raise ``BackChannelAuthError``."""
     required_claims = required_claims or {}

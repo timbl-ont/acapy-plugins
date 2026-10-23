@@ -1,7 +1,6 @@
 """Built-in authorization server: the plugin's own ``/token`` endpoint."""
 
 import time
-from typing import Optional
 
 from ..did_utils import retrieve_or_create_did_jwk
 from ..jwt import JWTVerifyResult, jwt_verify
@@ -19,7 +18,7 @@ class BuiltinProvider(AuthServerProvider):
     type = "builtin"
     serves_token_endpoint = True
 
-    def authorization_servers(self, ctx: AuthContext) -> Optional[list[str]]:
+    def authorization_servers(self, ctx: AuthContext) -> list[str] | None:
         """The issuer is its own authorization server; nothing to advertise."""
         return None
 

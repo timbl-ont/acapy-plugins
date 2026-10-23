@@ -22,6 +22,7 @@ from ..config import Config
 from ..cred_processor import CredProcessorError, CredProcessors
 from ..dpop import DPOP_HEADER
 from ..models.exchange import OID4VCIExchangeRecord
+from ..oauth_errors import oauth_error
 from ..models.supported_cred import SupportedCredential
 from ..routes import CredOfferQuerySchema, CredOfferResponseSchemaVal
 from ..routes.helpers import _parse_cred_offer
@@ -29,19 +30,6 @@ from ..utils import public_request_url
 from .token import check_token, handle_proof_of_posession
 
 LOGGER = logging.getLogger(__name__)
-
-
-def _vc_error(
-    status: int, error: str, description: str | None = None
-) -> web.HTTPException:
-    """Build a JSON-formatted OID4VCI error response per spec §7.3.2."""
-    body: dict = {"error": error}
-    if description:
-        body["error_description"] = description
-    kwargs = {"text": json.dumps(body), "content_type": "application/json"}
-    mapping = {400: web.HTTPBadRequest, 401: web.HTTPUnauthorized, 404: web.HTTPNotFound}
-    cls = mapping.get(status, web.HTTPInternalServerError)
-    return cls(**kwargs)
 
 
 @docs(tags=["oid4vci"], summary="Dereference a credential offer.")
@@ -163,14 +151,14 @@ async def _issue_cred_inner(context, token_result, refresh_id, req_body):
     format_field = req_body.get("format")
 
     if credential_identifier and format_field:
-        raise _vc_error(
+        raise oauth_error(
             400,
             "invalid_credential_request",
             "credential_identifier and format are mutually exclusive",
         )
 
     if not credential_identifier and not format_field:
-        raise _vc_error(
+        raise oauth_error(
             400,
             "invalid_credential_request",
             "credential_identifier or format is required",
@@ -201,17 +189,17 @@ async def _issue_cred_inner(context, token_result, refresh_id, req_body):
         except Exception:
             issued = None
         if issued:
-            raise _vc_error(
+            raise oauth_error(
                 400, "invalid_nonce", "Nonce already used; credential was already issued."
             )
-        raise _vc_error(
+        raise oauth_error(
             400, "invalid_credential_request", "No credential offer available."
         ) from err
     except (StorageError, BaseModelError) as err:
-        raise _vc_error(400, "invalid_credential_request", err.roll_up) from err
+        raise oauth_error(400, "invalid_credential_request", err.roll_up) from err
 
     if not supported.format:
-        raise _vc_error(
+        raise oauth_error(
             400, "invalid_credential_request", "SupportedCredential missing format."
         )
 
@@ -222,13 +210,13 @@ async def _issue_cred_inner(context, token_result, refresh_id, req_body):
         if supported.identifier != credential_identifier:
             # Distinguish request type for correct error code.
             if raw_credential_identifier:
-                raise _vc_error(
+                raise oauth_error(
                     400,
                     "invalid_credential_identifier",
                     "credential_identifier does not match offer",
                 )
             else:
-                raise _vc_error(
+                raise oauth_error(
                     400,
                     "invalid_credential_configuration",
                     "credential_configuration_id is not supported",
@@ -236,7 +224,7 @@ async def _issue_cred_inner(context, token_result, refresh_id, req_body):
     else:
         # Draft spec: Match by format
         if supported.format != format_field:
-            raise _vc_error(
+            raise oauth_error(
                 400,
                 "invalid_credential_request",
                 "Requested format does not match offer.",
@@ -250,7 +238,7 @@ async def _issue_cred_inner(context, token_result, refresh_id, req_body):
             for ad in authorization_details
         )
         if not found:
-            raise _vc_error(
+            raise oauth_error(
                 400,
                 "invalid_credential_request",
                 f"{supported.identifier} is not authorized by the token.",
@@ -269,11 +257,11 @@ async def _issue_cred_inner(context, token_result, refresh_id, req_body):
     elif "proofs" in req_body and isinstance(req_body["proofs"], dict):
         jwt_proofs = req_body["proofs"].get("jwt", [])
         if not jwt_proofs:
-            raise _vc_error(
+            raise oauth_error(
                 400, "invalid_proof", f"proofs.jwt is empty for {supported.format}"
             )
         if len(jwt_proofs) > 1:
-            raise _vc_error(
+            raise oauth_error(
                 400,
                 "invalid_proof",
                 f"proofs.jwt contains {len(jwt_proofs)} entries but batch "
@@ -282,12 +270,14 @@ async def _issue_cred_inner(context, token_result, refresh_id, req_body):
         # Normalize to the expected structure
         proof_value = {"proof_type": "jwt", "jwt": jwt_proofs[0]}
     else:
-        raise _vc_error(400, "invalid_proof", f"proof is required for {supported.format}")
+        raise oauth_error(
+            400, "invalid_proof", f"proof is required for {supported.format}"
+        )
 
     pop = await handle_proof_of_posession(context.profile, proof_value, c_nonce)
 
     if not pop.verified:
-        raise _vc_error(400, "invalid_proof", "Proof signature verification failed.")
+        raise oauth_error(400, "invalid_proof", "Proof signature verification failed.")
 
     try:
         processors = context.inject(CredProcessors)
@@ -295,7 +285,7 @@ async def _issue_cred_inner(context, token_result, refresh_id, req_body):
 
         credential = await processor.issue(req_body, supported, ex_record, pop, context)
     except CredProcessorError as e:
-        raise _vc_error(400, "invalid_credential_request", e.message)
+        raise oauth_error(400, "invalid_credential_request", e.message)
 
     async with context.session() as session:
         ex_record.state = OID4VCIExchangeRecord.STATE_ISSUED

@@ -34,6 +34,7 @@ from ..auth_providers import (
 from ..config import Config
 from ..dpop import DPOP_HEADER, DPoPError, verify_dpop_proof
 from ..models.nonce import Nonce
+from ..oauth_errors import oauth_error, oauth_error_response
 from ..pop_result import PopResult
 from ..pre_auth import PreAuthCodeError, redeem_pre_auth_code
 from ..utils import public_request_url
@@ -78,12 +79,6 @@ class GetTokenSchema(OpenAPISchema):
         return mutable
 
 
-def _token_error(error: str, description: str, status: int = 400) -> web.Response:
-    return web.json_response(
-        {"error": error, "error_description": description}, status=status
-    )
-
-
 @docs(tags=["oid4vci"], summary="Get credential issuance token")
 @form_schema(GetTokenSchema())
 async def token(request: web.Request):
@@ -101,14 +96,14 @@ async def token(request: web.Request):
         # The wallet should never reach this endpoint when an external auth server
         # is configured — it should obtain a token directly from the auth server's
         # token_endpoint advertised in the AS well-known metadata.
-        return _token_error(
+        return oauth_error_response(
             "invalid_request",
             "Token endpoint not available: use the authorization server",
         )
     form = await request.post()
 
     if (form.get("grant_type")) != PRE_AUTHORIZED_CODE_GRANT_TYPE:
-        return _token_error("unsupported_grant_type", "grant_type not supported")
+        return oauth_error_response("unsupported_grant_type", "grant_type not supported")
 
     config = Config.from_settings(context.settings)
 
@@ -121,7 +116,7 @@ async def token(request: web.Request):
                 dpop_proof, htm="POST", htu=public_request_url(config, request)
             )
         except DPoPError as err:
-            return _token_error("invalid_dpop_proof", err.description)
+            return oauth_error_response("invalid_dpop_proof", err.description)
 
     # Accept both hyphenated and underscored keys, and legacy user_pin.
     pre_authorized_code = form.get("pre-authorized_code") or form.get(
@@ -135,7 +130,7 @@ async def token(request: web.Request):
             tx_code if isinstance(tx_code, str) else None,
         )
     except PreAuthCodeError as err:
-        return _token_error(err.error, err.description)
+        return oauth_error_response(err.error, err.description)
 
     payload: Dict[str, Any] = {
         "sub": record.refresh_id,
@@ -157,7 +152,7 @@ async def token(request: web.Request):
                 verification_method=vm,
             )
         except (WalletNotFoundError, WalletError, ValueError) as err:
-            return _token_error(
+            return oauth_error_response(
                 "server_error", f"Unable to sign access token: {str(err)}", 500
             )
 
@@ -189,16 +184,6 @@ async def token(request: web.Request):
 
     return web.json_response(
         response, headers={"Cache-Control": "no-store", "Pragma": "no-cache"}
-    )
-
-
-def _unauthorized(error: str, description: str, scheme: str = "Bearer"):
-    return web.HTTPUnauthorized(
-        text=json.dumps({"error": error, "error_description": description}),
-        headers={
-            "Content-Type": "application/json",
-            "WWW-Authenticate": f'{scheme} error="{error}"',
-        },
     )
 
 
@@ -239,14 +224,19 @@ async def check_token(
     try:
         result = await provider.validate_access_token(ctx, cred)
     except InvalidTokenError as err:
-        raise _unauthorized("invalid_token", err.description) from err
+        raise oauth_error(
+            401, "invalid_token", err.description, www_authenticate="Bearer"
+        ) from err
 
     cnf = result.payload.get("cnf")
     jkt = cnf.get("jkt") if isinstance(cnf, dict) else None
     if jkt:
         if scheme != "dpop":
-            raise _unauthorized(
-                "invalid_token", "DPoP-bound token must use the DPoP scheme", "DPoP"
+            raise oauth_error(
+                401,
+                "invalid_token",
+                "DPoP-bound token must use the DPoP scheme",
+                www_authenticate="DPoP",
             )
         if htu is None:
             htu = f"{ctx.issuer_url}/credential"
@@ -255,9 +245,16 @@ async def check_token(
                 dpop_proof, htm=htm, htu=htu, access_token=cred, expected_jkt=jkt
             )
         except DPoPError as err:
-            raise _unauthorized(err.error, err.description, "DPoP") from err
+            raise oauth_error(
+                401, err.error, err.description, www_authenticate="DPoP"
+            ) from err
     elif provider.require_dpop(ctx):
-        raise _unauthorized("invalid_token", "DPoP-bound access token required", "DPoP")
+        raise oauth_error(
+            401,
+            "invalid_token",
+            "DPoP-bound access token required",
+            www_authenticate="DPoP",
+        )
 
     return AccessTokenResult(
         result.headers,

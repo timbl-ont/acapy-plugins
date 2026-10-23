@@ -8,7 +8,7 @@ server is pluggable: each mode is an ``AuthServerProvider`` selected by the
 
 import secrets
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
 from acapy_agent.core.profile import Profile
 
@@ -66,7 +66,7 @@ class AccessTokenResult(JWTVerifyResult):
         headers: Mapping[str, Any],
         payload: Mapping[str, Any],
         verified: bool,
-        exchange_key: Optional[str] = None,
+        exchange_key: str | None = None,
     ):
         """Initialize the result."""
         super().__init__(headers, payload, verified)
@@ -89,8 +89,8 @@ class AuthServerProvider:
         ctx: AuthContext,
         *,
         subject_id: str,
-        credential_configuration_id: Optional[str],
-        user_pin: Optional[str],
+        credential_configuration_id: str | None,
+        user_pin: str | None,
     ) -> str:
         """Mint the pre-authorized code placed in a credential offer.
 
@@ -107,7 +107,7 @@ class AuthServerProvider:
         """
         raise NotImplementedError()
 
-    def exchange_key(self, ctx: AuthContext, payload: Mapping[str, Any]) -> Optional[str]:
+    def exchange_key(self, ctx: AuthContext, payload: Mapping[str, Any]) -> str | None:
         """Return the exchange ``refresh_id`` a validated token authorizes."""
         return payload.get("sub")
 
@@ -115,7 +115,7 @@ class AuthServerProvider:
         """Whether access tokens must be DPoP-bound (``cnf.jkt``)."""
         return False
 
-    def authorization_servers(self, ctx: AuthContext) -> Optional[list[str]]:
+    def authorization_servers(self, ctx: AuthContext) -> list[str] | None:
         """Values for ``authorization_servers`` in the issuer metadata."""
         public_url = ctx.auth_server.get("public_url")
         return [public_url] if public_url else None
