@@ -71,14 +71,24 @@ def provider_type(entry: Mapping[str, Any] | None) -> str:
     return entry.get("type") or REFERENCE
 
 
-async def resolve_auth_provider(
-    session: ProfileSession, profile: Profile
+def auth_provider_for_entry(
+    profile: Profile, entry: Mapping[str, Any] | None
 ) -> Tuple[AuthServerProvider, AuthContext]:
-    """Resolve the provider and context for the current tenant."""
+    """Return the provider and context for a tenant's authorization server entry.
+
+    Without an entry, falls back to the plugin-level setting, then the built-in
+    authorization server.
+    """
     config = Config.from_settings(profile.settings)
-    entry = await get_first_auth_server(session, profile)
     if entry is None:
         entry = config.auth_server
     registry = profile.inject_or(AuthServerRegistry) or default_registry()
     provider = registry.get(provider_type(entry))
     return provider, AuthContext(profile, config, dict(entry or {}))
+
+
+async def resolve_auth_provider(
+    session: ProfileSession, profile: Profile
+) -> Tuple[AuthServerProvider, AuthContext]:
+    """Resolve the provider and context for the current tenant."""
+    return auth_provider_for_entry(profile, await get_first_auth_server(session, profile))

@@ -8,8 +8,9 @@ the back-channel redeem endpoint. Either way the same checks apply:
 - the code is single use;
 - ``tx_code`` is compared in constant time;
 - after ``max_tx_code_attempts`` failures the code is locked, so a ``tx_code``
-  cannot be brute-forced online (OID4VCI 1.0 §13.6.2). Creating a new offer
-  for the exchange mints a fresh code and resets the counter.
+  cannot be brute-forced online (OID4VCI 1.0 §13.6.2). An exchange gets one
+  code; fetching its offer again returns the same code, so a locked code
+  needs a new exchange.
 """
 
 import hmac

@@ -260,7 +260,7 @@ The Plugin expects the following configuration options. These options can either
 - `OID4VCI_AUTH_SERVER` or `oid4vci.auth_server`
   - Plugin-level authorization server (JSON object, see [Authorization Server](#authorization-server)). Used when a tenant has no `authorization_servers` in its `IssuerConfiguration`. Unset means the built-in authorization server.
 - `OID4VCI_MAX_TX_CODE_ATTEMPTS` or `oid4vci.max_tx_code_attempts`
-  - Failed `tx_code` attempts allowed per pre-authorized code before the code is locked (default `5`). Creating a new offer for the exchange issues a fresh code and resets the count.
+  - Failed `tx_code` attempts allowed per pre-authorized code before the code is locked (default `5`). Each exchange has one code (fetching its offer again returns the same code), so a locked code needs a new exchange.
 
 #### Nonce Handling
 

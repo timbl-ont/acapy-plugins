@@ -63,8 +63,8 @@ Each provider covers these parts of the flow:
 - **`pre_auth.py`**: `redeem_pre_auth_code`, used by both the built-in
   `/token` and the redeem endpoint. In one transaction it checks the code is
   single use, compares the `tx_code` in constant time, and enforces a
-  failed-attempt limit (`max_tx_code_attempts`, default 5). A new offer resets
-  the code and the counter.
+  failed-attempt limit (`max_tx_code_attempts`, default 5). Each exchange has
+  one code, so a locked code needs a new exchange.
 
 ## Keycloak
 

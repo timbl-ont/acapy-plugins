@@ -6,21 +6,82 @@ import time
 from typing import Any
 
 from acapy_agent.admin.request_context import AdminRequestContext
+from acapy_agent.core.profile import Profile
 from acapy_agent.messaging.models.openapi import OpenAPISchema
+from acapy_agent.storage.error import StorageNotFoundError
 from acapy_agent.wallet.error import WalletError, WalletNotFoundError
 from acapy_agent.wallet.util import b64_to_bytes
 from aiohttp import web
 from aiohttp_apispec import docs, response_schema
 from marshmallow import fields
 
+from ..auth_providers import AuthContext, AuthServerProvider, auth_provider_for_entry
 from ..config import Config
 from ..cred_processor import CredProcessors
 from ..did_utils import retrieve_or_create_did_jwk
 from ..jwt import jwt_sign
+from ..models.issuer_config import IssuerConfiguration
 from ..models.supported_cred import SupportedCredential
-from ..auth_providers import resolve_auth_provider
 
 LOGGER = logging.getLogger(__name__)
+
+
+async def _load_issuer_config(
+    session, wallet_id: str | None
+) -> IssuerConfiguration | None:
+    """Load the tenant's IssuerConfiguration, if any."""
+    try:
+        return await IssuerConfiguration.retrieve_by_id(
+            session, wallet_id or "default-wallet"
+        )
+    except StorageNotFoundError:
+        return None
+
+
+def _auth_provider(
+    profile: Profile, issuer_config: IssuerConfiguration | None
+) -> tuple[AuthServerProvider, AuthContext]:
+    """Provider for the authorization server in use (the first configured entry)."""
+    servers = issuer_config.authorization_servers if issuer_config else None
+    return auth_provider_for_entry(profile, servers[0] if servers else None)
+
+
+def _build_cred_configs(credentials_supported, processors) -> dict:
+    """Build the credential_configurations_supported map."""
+    result: dict = {}
+    for supported in credentials_supported:
+        try:
+            issuer = processors.issuer_for_format(supported.format)
+        except Exception:
+            issuer = None
+        result[supported.identifier] = supported.to_issuer_metadata(issuer=issuer)
+    return result
+
+
+def _apply_overlay(
+    metadata: dict, issuer_config, cred_configs: dict, base_url: str, enable_nonce: bool
+) -> None:
+    """Overlay DB config (keeping server-derived cred_configs) and gate nonce_endpoint."""
+    if issuer_config:
+        metadata.update(issuer_config.issuer_metadata(base_url))
+        metadata["credential_configurations_supported"] = cred_configs
+    if enable_nonce:
+        metadata.setdefault("nonce_endpoint", f"{base_url}/nonce")
+    else:
+        metadata.pop("nonce_endpoint", None)
+
+
+def _set_authorization_servers(
+    metadata: dict, provider: AuthServerProvider, auth_ctx: AuthContext
+) -> None:
+    """Advertise the authorization server whose tokens this issuer accepts.
+
+    Applied after the overlay, which lists every configured entry although only
+    the first is used.
+    """
+    servers = provider.authorization_servers(auth_ctx)
+    if servers:
+        metadata["authorization_servers"] = servers
 
 
 class BatchCredentialIssuanceSchema(OpenAPISchema):
@@ -51,8 +112,10 @@ class CredentialIssuerMetadataSchema(OpenAPISchema):
         required=False,
         metadata={"description": "The nonce endpoint."},
     )
-    credential_configurations_supported = fields.List(
-        fields.Dict(),
+    credential_configurations_supported = fields.Dict(
+        keys=fields.Str(),
+        values=fields.Dict(),
+        required=True,
         metadata={"description": "The supported credentials."},
     )
     batch_credential_issuance = fields.Nested(
@@ -68,8 +131,8 @@ async def credential_issuer_metadata(request: web.Request):
     """Credential issuer metadata endpoint.
 
     If the client sends `Accept: application/jwt`, the metadata is returned as
-    a signed JWT (OID4VCI 1.0 §11.2.2 — signed metadata).  Otherwise, plain
-    JSON is returned.
+    a signed JWT (OID4VCI 1.0 §12.2.2 — metadata retrieval; §12.2.3 defines
+    the signed metadata format). Otherwise, plain JSON is returned.
     """
     context: AdminRequestContext = request["context"]
     config = Config.from_settings(context.settings)
@@ -78,43 +141,34 @@ async def credential_issuer_metadata(request: web.Request):
     async with context.session() as session:
         # TODO If there's a lot, this will be a problem
         credentials_supported = await SupportedCredential.query(session)
-        provider, auth_ctx = await resolve_auth_provider(session, context.profile)
 
         wallet_id = request.match_info.get("wallet_id")
         subpath = f"/tenant/{wallet_id}" if wallet_id else ""
+        issuer_config = await _load_issuer_config(session, wallet_id)
+        provider, auth_ctx = _auth_provider(context.profile, issuer_config)
+
         metadata: dict[str, Any] = {"credential_issuer": f"{public_url}{subpath}"}
-        authorization_servers = provider.authorization_servers(auth_ctx)
-        if authorization_servers:
-            # Point directly at the auth server's public URL so the wallet
-            # performs OAuth discovery and token requests against the auth server.
-            metadata["authorization_servers"] = authorization_servers
         if provider.serves_token_endpoint:
-            # When ACA-Py is its own authorization server (no external auth server),
-            # include token_endpoint directly in the credential issuer metadata.
-            # This is technically an extension beyond OID4VCI spec §11.2.1 (which
-            # says token_endpoint belongs in AS metadata via /.well-known/oauth-
-            # authorization-server), but some wallets (e.g. waltid) read
-            # token_endpoint from resolveCIProviderMetadata() and NPE if absent,
-            # rather than performing AS discovery.
+            # Extension for wallets (e.g. waltid) that read token_endpoint from
+            # credential issuer metadata instead of doing AS discovery.
             metadata["token_endpoint"] = f"{public_url}{subpath}/token"
         metadata["credential_endpoint"] = f"{public_url}{subpath}/credential"
         metadata["notification_endpoint"] = f"{public_url}{subpath}/notification"
-        if config.enable_nonce_endpoint:
-            metadata["nonce_endpoint"] = f"{public_url}{subpath}/nonce"
-        processors = context.inject(CredProcessors)
-        cred_configs = {}
-        for supported in credentials_supported:
-            try:
-                issuer = processors.issuer_for_format(supported.format)
-            except Exception:
-                issuer = None
-            cred_configs[supported.identifier] = supported.to_issuer_metadata(
-                issuer=issuer
-            )
+        cred_configs = _build_cred_configs(
+            credentials_supported, context.inject(CredProcessors)
+        )
         metadata["credential_configurations_supported"] = cred_configs
 
-        # OID4VCI 1.0 §11.2.2: if client requests signed metadata, sign and return
-        # the metadata document as a JWT with Content-Type: application/jwt.
+        _apply_overlay(
+            metadata,
+            issuer_config,
+            cred_configs,
+            f"{public_url}{subpath}",
+            config.enable_nonce_endpoint,
+        )
+        _set_authorization_servers(metadata, provider, auth_ctx)
+
+        # OID4VCI 1.0 §12.2.2/§12.2.3: signed metadata as JWT with application/jwt.
         accept = request.headers.get("Accept", "")
         vm: str | None = None
         jwk_public: dict | None = None
@@ -123,7 +177,6 @@ async def credential_issuer_metadata(request: web.Request):
                 async with context.profile.session() as sig_session:
                     jwk_info = await retrieve_or_create_did_jwk(sig_session)
                 vm = f"{jwk_info.did}#0"
-                # Decode the public JWK from the did:jwk DID.
                 # did:jwk:<base64url(jwk_json)> — reverse _create_default_did.
                 jwk_encoded = jwk_info.did[len("did:jwk:") :]
                 jwk_public = json.loads(b64_to_bytes(jwk_encoded, urlsafe=True).decode())
@@ -131,8 +184,9 @@ async def credential_issuer_metadata(request: web.Request):
                 LOGGER.warning("Cannot sign metadata JWT: %s", err)
 
     if "application/jwt" in accept and vm and jwk_public:
-        # Build JWT payload: include all metadata fields + required JWT claims
-        issuer_url = f"{public_url}{subpath}"
+        # §12.2.3: `sub` MUST match the Credential Issuer Identifier — use the
+        # value in metadata so a DB-overridden credential_issuer is honored.
+        issuer_url = metadata["credential_issuer"]
         payload = {
             **metadata,
             "iss": issuer_url,
@@ -142,13 +196,11 @@ async def credential_issuer_metadata(request: web.Request):
         try:
             signed_jwt = await jwt_sign(
                 context.profile,
-                # Include the public JWK in the header — OID4VCI §11.2.2 / RFC 7515
-                # requires either `jwk` or `x5c` for signed issuer metadata.
-                # The `jwk` must have `kid` matching the JWT header's `kid` so
-                # the conformance suite can locate the correct key.
+                # OID4VCI §12.2.3 requires typ=openidvci-issuer-metadata+jwt.
+                # `jwk` in the header conveys the key (RFC 7515 §4.1.3).
                 headers={
                     "jwk": {**jwk_public, "kid": vm},
-                    "typ": "openid-credential-issuer",
+                    "typ": "openidvci-issuer-metadata+jwt",
                 },
                 payload=payload,
                 verification_method=vm,
@@ -182,61 +234,41 @@ async def openid_configuration(request: web.Request):
     async with context.session() as session:
         # TODO If there's a lot, this will be a problem
         credentials_supported = await SupportedCredential.query(session)
-        provider, auth_ctx = await resolve_auth_provider(session, context.profile)
 
         wallet_id = request.match_info.get("wallet_id")
         subpath = f"/tenant/{wallet_id}" if wallet_id else ""
         base_url = f"{public_url}{subpath}"
+        issuer_config = await _load_issuer_config(session, wallet_id)
+        provider, auth_ctx = _auth_provider(context.profile, issuer_config)
 
-        processors = context.inject(CredProcessors)
-        cred_configs = {}
-        for supported in credentials_supported:
-            try:
-                issuer = processors.issuer_for_format(supported.format)
-            except Exception:
-                issuer = None
-            cred_configs[supported.identifier] = supported.to_issuer_metadata(
-                issuer=issuer
-            )
+        cred_configs = _build_cred_configs(
+            credentials_supported, context.inject(CredProcessors)
+        )
 
-        # Combined OIDC Discovery + OID4VCI metadata
         metadata: dict[str, Any] = {
-            # OIDC Discovery fields (RFC 8414 / OIDC Discovery required fields)
             "issuer": base_url,
-            # authorization_endpoint is required by CheckServerConfiguration in the
-            # OIDF conformance suite (condition.common.CheckServerConfiguration checks
-            # for "authorization_endpoint", "token_endpoint", and "issuer").
-            # For pre-authorized_code flow the authorization endpoint is not invoked,
-            # but it must be advertised in the AS metadata.
+            # Required by OIDF CheckServerConfiguration; unused in pre-auth flow.
             "authorization_endpoint": f"{base_url}/authorize",
-            "token_endpoint": f"{base_url}/token",
             "response_types_supported": ["code"],
-            # DPoP support - required by HAIP profile (DPOP-5.1).
-            # Advertise the algorithms supported for DPoP proof JWTs.
             "dpop_signing_alg_values_supported": ["ES256", "ES384", "ES512"],
-            # OAuth 2.0 AS Metadata fields
             "grant_types_supported": [
                 "urn:ietf:params:oauth:grant-type:pre-authorized_code"
             ],
-            # RFC 9396 Rich Authorization Requests — advertise the authorization_details
-            # type(s) supported (required by OID4VCI HAIP AS metadata validation).
             "authorization_details_types_supported": ["openid_credential"],
-            # OID4VCI fields
             "credential_issuer": base_url,
             "credential_endpoint": f"{base_url}/credential",
             "notification_endpoint": f"{base_url}/notification",
             "credential_configurations_supported": cred_configs,
         }
 
-        if config.enable_nonce_endpoint:
-            # OID4VCI nonce endpoint for server-generated nonces (HAIP required).
-            # Wallets call this before building a credential proof to get a fresh
-            # nonce that ACA-Py validates in the JWT proof `nonce` claim.
-            metadata["nonce_endpoint"] = f"{base_url}/nonce"
+        # token_endpoint belongs to the AS; only advertise when ACA-Py is its own AS.
+        if provider.serves_token_endpoint:
+            metadata["token_endpoint"] = f"{base_url}/token"
 
-        authorization_servers = provider.authorization_servers(auth_ctx)
-        if authorization_servers:
-            metadata["authorization_servers"] = authorization_servers
+        _apply_overlay(
+            metadata, issuer_config, cred_configs, base_url, config.enable_nonce_endpoint
+        )
+        _set_authorization_servers(metadata, provider, auth_ctx)
 
     LOGGER.debug("OPENID CONFIG: %s", metadata)
 

@@ -363,6 +363,12 @@ assertion names its tenant under the realm's signature. Unknown issuers,
 tenants not using Keycloak, and failed authentication all return 401
 `invalid_client`.
 
+`oid4vci.credential.issuer` must be the plugin's own URL for the tenant
+(`{endpoint}` or `{endpoint}/tenant/{wallet_id}`), even if the tenant's
+`IssuerConfiguration` overrides the `credential_issuer` published in its
+metadata: the plugin finds the tenant, and checks the access token `aud`,
+by that URL.
+
 Why not ACA-Py admin credentials: a tenant token can do everything the tenant
 can (issue credentials, create DIDs), and ACA-Py keeps only one valid token
 per tenant, so the controller and Keycloak would have to share it and any

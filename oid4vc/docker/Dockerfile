@@ -1,3 +1,7 @@
+# isomdl-uniffi release used for mdoc support. Indicio publishes a Linux wheel
+# for amd64 only; arm64 builds the same release from source.
+ARG ISOMDL_VERSION=v0.1.0-indicio.1
+
 FROM python:3.13-slim-bookworm AS base
 WORKDIR /usr/src/app
 
@@ -25,18 +29,23 @@ RUN mkdir -p keycloak/oid4vc_keycloak && touch keycloak/oid4vc_keycloak/__init__
 COPY pyproject.toml poetry.lock README.md ./
 RUN poetry install --without dev --all-extras
 
-#build the isomdl library from indicio. Tempory solution until we have a wheel on pypi with linux arm support
-RUN apt-get update && apt-get install -y git build-essential && apt-get clean
-# Pinned: later commits force a zig linker and add a status_list arg the plugin doesn't pass.
-RUN git clone https://github.com/Indicio-tech/isomdl-uniffi.git && git -C isomdl-uniffi checkout 2bce4e0
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-WORKDIR /usr/src/app/isomdl-uniffi/python
-RUN python build.py
+ARG TARGETARCH
+ARG ISOMDL_VERSION
+RUN mkdir -p isomdl-uniffi/python/isomdl_uniffi && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        apt-get update && apt-get install -y git build-essential && apt-get clean && \
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+        rm -rf isomdl-uniffi && \
+        git clone --depth 1 --branch "$ISOMDL_VERSION" https://github.com/Indicio-tech/isomdl-uniffi.git && \
+        cd isomdl-uniffi/python && PATH="/root/.cargo/bin:$PATH" python build.py; \
+    fi
 
 USER $user
 
 FROM python:3.13-bookworm
+
+ARG TARGETARCH
+ARG ISOMDL_VERSION
 
 WORKDIR /usr/src/app
 COPY --from=base /usr/src/app/.venv /usr/src/app/.venv
@@ -50,9 +59,17 @@ COPY keycloak/oid4vc_keycloak/ keycloak/oid4vc_keycloak/
 ADD https://github.com/openwallet-foundation/acapy-plugins.git#main:status_list/status_list/ status_list/
 COPY docker/*.yml ./
 
-#Install the isomdl library built in the base stage. 
+
+# isomdl-uniffi: the release wheel on amd64, the bindings built in the base
+# stage on arm64 (an empty directory on amd64).
 COPY --from=base /usr/src/app/isomdl-uniffi/python/isomdl_uniffi /usr/src/app/mso_mdoc/isomdl
 ENV PYTHONPATH="/usr/src/app/mso_mdoc/isomdl:$PYTHONPATH"
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+        pip install --no-cache-dir "https://github.com/Indicio-tech/isomdl-uniffi/releases/download/${ISOMDL_VERSION}/isomdl_uniffi-0.1.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"; \
+    elif [ "$TARGETARCH" != "arm64" ]; then \
+        echo "Unsupported architecture: $TARGETARCH"; \
+        exit 1; \
+    fi
 
 ENTRYPOINT ["/bin/bash", "-c", "aca-py \"$@\"", "--"]
 CMD ["start", "--arg-file", "default.yml"]

@@ -26,6 +26,7 @@ def dummy_request(context):
             headers=None,
             path="/dummy-path",
             match_info=None,
+            method="POST",
         ):
             self._json = json_data or {
                 "did": "did:key:z6MkvtXw2eu715zQ3vzCh1FQNNhkdVhpzHKh4L5sVPGZ6Mcs",
@@ -35,6 +36,7 @@ def dummy_request(context):
             self.headers = headers or {"Authorization": "Bearer testtoken"}
             self.path = path
             self.match_info = match_info or {}
+            self.method = method
 
         async def json(self):
             return self._json
@@ -86,7 +88,7 @@ async def test_parse_cred_offer(monkeypatch, context):
     mock_record.pin = "1234"
     mock_record.refresh_id = "refresh_id"
     mock_record.code = None
-    mock_record.state = None
+    mock_record.state = OID4VCIExchangeRecord.STATE_CREATED
     mock_record.save = AsyncMock()
     monkeypatch.setattr(
         "oid4vc.routes.helpers.OID4VCIExchangeRecord.retrieve_by_id",
@@ -101,6 +103,9 @@ async def test_parse_cred_offer(monkeypatch, context):
     )
     monkeypatch.setattr(
         "oid4vc.routes.helpers._create_pre_auth_code", AsyncMock(return_value="code123")
+    )
+    monkeypatch.setattr(
+        "oid4vc.routes.helpers.get_first_auth_server", AsyncMock(return_value=None)
     )
     offer = await _parse_cred_offer(context, "exchange_id")
     assert offer["credential_issuer"].startswith("http://localhost:8020")
