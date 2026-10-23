@@ -59,6 +59,13 @@ import org.jboss.logging.Logger;
  *       default one year): rotated tokens keep the first token's expiry.</li>
  * </ul>
  * Revoking a refresh token (revocation endpoint) marks its whole family revoked.
+ * <p>
+ * The rotation logic ({@link #validateTokenReuseForRefresh}, the rotation
+ * record and its lock id) is adapted from Keycloak 26.8.0's
+ * {@code org.keycloak.protocol.oid4vc.refresh.OID4VCIRefreshTokenProvider}
+ * (Apache License 2.0), which in turn mirrors {@code TokenManager#validateTokenReuse}.
+ * The refresh token SPI is internal to Keycloak: re-check this class against
+ * those upstream classes on every Keycloak upgrade.
  */
 public class Oid4vciRefreshTokenProvider extends AbstractRefreshTokenProvider {
 

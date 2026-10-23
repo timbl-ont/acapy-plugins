@@ -1,28 +1,27 @@
 package org.openwallet.acapy.oid4vc.keycloak;
 
 import java.io.IOException;
-import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
+import org.keycloak.OAuthErrorException;
 import org.keycloak.TokenCategory;
 import org.keycloak.common.util.Time;
 import org.keycloak.crypto.SignatureProvider;
 import org.keycloak.crypto.SignatureSignerContext;
+import org.keycloak.http.simple.SimpleHttp;
+import org.keycloak.http.simple.SimpleHttpResponse;
 import org.keycloak.jose.jws.JWSBuilder;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.services.Urls;
 import org.keycloak.util.JsonSerialization;
 import org.keycloak.vault.VaultStringSecret;
+
+import org.apache.http.client.config.RequestConfig;
 
 import org.jboss.logging.Logger;
 
@@ -40,7 +39,9 @@ import org.jboss.logging.Logger;
  *   <li>{@code client_secret_post}: client_id + client_secret form parameters.</li>
  * </ul>
  * Credentials are sent in the form body: on the ACA-Py admin port the
- * {@code Authorization} header is reserved for ACA-Py tenant tokens.
+ * {@code Authorization} header is reserved for ACA-Py tenant tokens. The call
+ * goes through Keycloak's HTTP client ({@link SimpleHttp}), so it honours the
+ * server's outgoing proxy, trust store and connection settings.
  * <p>
  * The plugin tenant is carried in the authentication: the request names the
  * credential issuer it acts for ({@code oid4vci.credential.issuer}) as a
@@ -58,10 +59,6 @@ final class RedeemClient {
     private static final int ASSERTION_TTL_SECONDS = 60;
 
     private static final Logger LOGGER = Logger.getLogger(RedeemClient.class);
-    private static final HttpClient HTTP = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(5))
-            .followRedirects(HttpClient.Redirect.NEVER)
-            .build();
 
     /** Successful redemption. */
     record Redemption(String refreshId, List<String> credentialConfigurationIds, Integer expiresIn) {
@@ -94,54 +91,61 @@ final class RedeemClient {
         }
         form.put(CREDENTIAL_ISSUER, config.credentialIssuer);
 
-        HttpResponse<String> response;
+        int status;
+        String body;
         try {
             addClientAuthentication(session, realm, config, form);
-            HttpRequest request = HttpRequest.newBuilder(config.redeemUrl)
-                    .timeout(Duration.ofMillis(config.redeemTimeoutMs))
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .header("Accept", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(encode(form)))
+            RequestConfig requestConfig = RequestConfig.custom()
+                    .setConnectTimeout(config.redeemTimeoutMs)
+                    .setConnectionRequestTimeout(config.redeemTimeoutMs)
+                    .setSocketTimeout(config.redeemTimeoutMs)
+                    .setRedirectsEnabled(false)
                     .build();
-            response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RedeemException("server_error", "redeem call interrupted", true);
+            try (SimpleHttpResponse response = SimpleHttp.create(session)
+                    .withRequestConfig(requestConfig)
+                    .doPost(config.redeemUrl.toString())
+                    .params(form)
+                    .acceptJson()
+                    .asResponse()) {
+                status = response.getStatus();
+                body = response.asString();
+            }
         } catch (IOException | RuntimeException e) {
             LOGGER.warnf(e, "Pre-authorized code redeem call to %s failed", config.redeemUrl);
-            throw new RedeemException("server_error", "redeem call failed", true);
+            throw new RedeemException(OAuthErrorException.SERVER_ERROR, "redeem call failed", true);
         }
 
         Map<?, ?> json;
         try {
-            json = JsonSerialization.readValue(response.body(), Map.class);
-        } catch (IOException e) {
+            json = JsonSerialization.readValue(body, Map.class);
+        } catch (IOException | RuntimeException e) {
             json = Map.of();
         }
 
-        if (response.statusCode() == 200) {
+        if (status == 200) {
             Object refreshId = json.get("refresh_id");
             Object ids = json.get("credential_configuration_ids");
             if (!(refreshId instanceof String) || !(ids instanceof List<?> list) || list.isEmpty()) {
-                throw new RedeemException("server_error", "malformed redeem response", true);
+                throw new RedeemException(OAuthErrorException.SERVER_ERROR, "malformed redeem response", true);
             }
             Object expiresIn = json.get("expires_in");
             return new Redemption((String) refreshId,
                     list.stream().map(String::valueOf).toList(),
                     expiresIn instanceof Number n ? n.intValue() : null);
         }
-        if (response.statusCode() == 400) {
+        if (status == 400) {
             Object error = json.get("error");
-            String code400 = "invalid_request".equals(error) ? "invalid_request" : "invalid_grant";
+            String code400 = OAuthErrorException.INVALID_REQUEST.equals(error)
+                    ? OAuthErrorException.INVALID_REQUEST : OAuthErrorException.INVALID_GRANT;
             throw new RedeemException(code400, String.valueOf(json.get("error_description")), false);
         }
-        if (response.statusCode() == 401) {
+        if (status == 401) {
             LOGGER.errorf("The plugin rejected Keycloak's client authentication for %s; check "
                     + "oid4vci.redeem.client.* and the tenant's redeem_client settings", config.redeemUrl);
         } else {
-            LOGGER.warnf("Pre-authorized code redeem call returned HTTP %d", response.statusCode());
+            LOGGER.warnf("Pre-authorized code redeem call returned HTTP %d", status);
         }
-        throw new RedeemException("server_error", "redeem call returned " + response.statusCode(), true);
+        throw new RedeemException(OAuthErrorException.SERVER_ERROR, "redeem call returned " + status, true);
     }
 
     private static void addClientAuthentication(KeycloakSession session, RealmModel realm,
@@ -200,12 +204,5 @@ final class RedeemClient {
             return secret.get().orElseThrow(() -> new IllegalStateException(
                     Oid4vciPreAuthConfig.REDEEM_CLIENT_SECRET + " could not be resolved"));
         }
-    }
-
-    private static String encode(Map<String, String> form) {
-        return form.entrySet().stream()
-                .map(e -> URLEncoder.encode(e.getKey(), StandardCharsets.UTF_8) + "="
-                        + URLEncoder.encode(e.getValue(), StandardCharsets.UTF_8))
-                .collect(Collectors.joining("&"));
     }
 }

@@ -4,6 +4,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
 
 import org.keycloak.OAuth2Constants;
@@ -56,7 +57,6 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
     static final String TX_CODE_PARAM = "tx_code";
     static final String CREDENTIAL_CONFIGURATION_IDS_CLAIM = "credential_configuration_ids";
     static final String AUTH_METHOD = "oid4vci-pre-authorized-code";
-    static final String INVALID_DPOP_PROOF = "invalid_dpop_proof";
 
     private static final Logger LOGGER = Logger.getLogger(Oid4vciPreAuthGrantType.class);
 
@@ -68,7 +68,7 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
             LOGGER.errorf("Realm '%s' is missing %s / %s", realm.getName(),
                     Oid4vciPreAuthConfig.REDEEM_URL, Oid4vciPreAuthConfig.CREDENTIAL_ISSUER);
             event.error(Errors.INVALID_REQUEST);
-            throw error("server_error", "pre-authorized code grant is not configured",
+            throw error(OAuthErrorException.SERVER_ERROR, "pre-authorized code grant is not configured",
                     Response.Status.INTERNAL_SERVER_ERROR);
         }
 
@@ -87,7 +87,8 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
         DPoP dpop = session.getAttribute(DPoPUtil.DPOP_SESSION_ATTRIBUTE, DPoP.class);
         if (config.requireDpop && dpop == null) {
             event.detail(Details.REASON, "DPoP proof required").error(Errors.INVALID_DPOP_PROOF);
-            throw error(INVALID_DPOP_PROOF, "DPoP proof is required", Response.Status.BAD_REQUEST);
+            throw error(OAuthErrorException.INVALID_DPOP_PROOF, "DPoP proof is required",
+                    Response.Status.BAD_REQUEST);
         }
 
         // authorization_details in the token request is ignored: the credential
@@ -102,7 +103,7 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
         } catch (RedeemClient.RedeemException e) {
             event.detail(Details.REASON, e.getMessage()).error(Errors.INVALID_CODE);
             if (e.unavailable) {
-                throw error("temporarily_unavailable", "Credential issuer unavailable",
+                throw error(OAuthErrorException.TEMPORARILY_UNAVAILABLE, "Credential issuer unavailable",
                         Response.Status.SERVICE_UNAVAILABLE);
             }
             throw error(e.error, OAuthErrorException.INVALID_REQUEST.equals(e.error)
@@ -115,7 +116,7 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
         if (holder == null || !holder.isEnabled()) {
             LOGGER.errorf("Realm '%s' has no enabled holder user '%s'", realm.getName(), config.holderUsername);
             event.error(Errors.USER_NOT_FOUND);
-            throw error("server_error", "pre-authorized code grant is not configured",
+            throw error(OAuthErrorException.SERVER_ERROR, "pre-authorized code grant is not configured",
                     Response.Status.INTERNAL_SERVER_ERROR);
         }
         event.user(holder).detail(Details.USERNAME, holder.getUsername());
@@ -177,7 +178,7 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
         // client_id is not a credential.
         boolean presentsCredentials =
                 headers.getHeaderString(AttestationBasedClientAuthenticator.OAUTH_CLIENT_ATTESTATION_HEADER) != null
-                || headers.getHeaderString("Authorization") != null
+                || headers.getHeaderString(HttpHeaders.AUTHORIZATION) != null
                 || formParams.getFirst(OAuth2Constants.CLIENT_ASSERTION) != null
                 || formParams.getFirst(OAuth2Constants.CLIENT_SECRET) != null;
 
@@ -234,7 +235,7 @@ public class Oid4vciPreAuthGrantType extends OAuth2GrantTypeBase {
 
     @Override
     public EventType getEventType() {
-        return EventType.CLIENT_LOGIN;
+        return EventType.VERIFIABLE_CREDENTIAL_PRE_AUTHORIZED_GRANT;
     }
 
     @Override

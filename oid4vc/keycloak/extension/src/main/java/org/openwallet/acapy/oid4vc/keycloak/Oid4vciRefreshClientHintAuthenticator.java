@@ -4,12 +4,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedMap;
 
 import org.keycloak.OAuth2Constants;
 import org.keycloak.authentication.ClientAuthenticationFlowContext;
 import org.keycloak.authentication.authenticators.client.AbstractClientAuthenticator;
 import org.keycloak.authentication.authenticators.client.AttestationBasedClientAuthenticator;
+import org.keycloak.models.AuthenticationExecutionModel;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.provider.ProviderConfigProperty;
@@ -44,7 +46,7 @@ public class Oid4vciRefreshClientHintAuthenticator extends AbstractClientAuthent
             return;
         }
         if (form.getFirst(OAuth2Constants.CLIENT_ID) != null
-                || context.getHttpRequest().getHttpHeaders().getHeaderString("Authorization") != null
+                || context.getHttpRequest().getHttpHeaders().getHeaderString(HttpHeaders.AUTHORIZATION) != null
                 || context.getHttpRequest().getHttpHeaders().getHeaderString(
                         AttestationBasedClientAuthenticator.OAUTH_CLIENT_ATTESTATION_HEADER) != null) {
             return;
@@ -82,7 +84,7 @@ public class Oid4vciRefreshClientHintAuthenticator extends AbstractClientAuthent
     }
 
     @Override
-    public org.keycloak.models.AuthenticationExecutionModel.Requirement[] getRequirementChoices() {
+    public AuthenticationExecutionModel.Requirement[] getRequirementChoices() {
         return REQUIREMENT_CHOICES;
     }
 
