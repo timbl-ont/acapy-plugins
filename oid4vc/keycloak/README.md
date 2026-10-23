@@ -534,6 +534,16 @@ reference authorization server.
 - **AS metadata.** Keycloak's discovery document does not list the custom
   grant in `grant_types_supported`. Most wallets just use the
   `token_endpoint`.
+- **Wallets that skip parts of OID4VCI 1.0.** Some wallets send
+  `authorization_details` without `locations`, although §5.1.1 requires it
+  (set to the credential issuer) whenever the issuer metadata lists
+  `authorization_servers`, as it does with Keycloak. They then request the
+  credential by `credential_configuration_id`, although §8.2 requires
+  `credential_identifier` once the token response returned
+  `credential_identifiers`. Both are accepted: a realm serves a single
+  credential issuer, so a missing `locations` is unambiguous (one naming
+  another issuer is rejected), and the token's `authorization_details` still
+  limit which configuration can be issued.
 - **Credential refresh under another configuration.** Tokens issued with
   `authorization_details` name the original credential configuration, so if
   the controller refreshes a credential under a different configuration, the
