@@ -233,9 +233,9 @@ wallet can name the credential configuration in the token request:
 
 ## Refresh tokens
 
-DPoP adds little to a five-minute access token that the wallet uses once,
+DPoP adds little value to a five-minute access token that the wallet uses once,
 seconds after it is issued. It matters for a long-lived refresh token, which
-lets the wallet get new access tokens, and so refreshed credentials, without
+lets the wallet get new access tokens, and therefore refreshed credentials, without
 a new offer.
 
 ```mermaid
@@ -572,5 +572,5 @@ reference authorization server.
   `authorization_details` name the original credential configuration, so if
   the controller refreshes a credential under a different configuration, the
   plugin refuses those tokens and the wallet needs a new offer.
-- **Authorization code flow** (e.g. with an upstream IdP such as Okta) is not
+- **Authorization code flow** (e.g. with an upstream IdP) is not
   covered by this extension. See [the design notes](../docs/auth-server-providers.md#future-authorization-code-flow).
