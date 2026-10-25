@@ -1,8 +1,9 @@
 # Keycloak as the OID4VCI authorization server
 
-This directory lets Keycloak act as the wallet-facing OAuth authorization
-server for the OID4VC plugin's **pre-authorized code flow**. Keycloak checks
-wallet attestation (attestation-based client authentication, "ABCA") and DPoP.
+This plugin and Keycloak extension enable Keycloak to act as the
+wallet-facing OAuth authorization server for the OID4VC plugin's
+**pre-authorized code flow**. Keycloak checks wallet attestation
+(attestation-based client authentication, "ABCA") and DPoP.
 The plugin stays the Credential Issuer and the resource server, and keeps
 ownership of the offer, the pre-authorized code, the `tx_code` and the
 exchange.
