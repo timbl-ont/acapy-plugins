@@ -519,11 +519,19 @@ reference authorization server.
 
 - **Internal SPI.** The grant type SPI may break on Keycloak upgrades. Pin
   the version.
-- **ABCA is experimental in Keycloak.** Keycloak 26.8.0 does not check the
-  attestation PoP `jti` for replay, and does not yet support a
-  server-provided challenge (both are upstream TODOs). Until it does, ABCA
-  relies on the PoP being freshly signed for this AS (`aud`); there is no
-  replay protection within the attestation's lifetime.
+- **ABCA is experimental in Keycloak.** Keycloak 26.8.0 verifies the
+  attestation PoP's signature, `iss` and `aud`, but does not check its `jti`
+  for reuse or its `iat` for age. It supports neither server-provided
+  challenges nor the DPoP combined mode (ABCA §5.2). A captured attestation
+  and PoP can therefore be replayed, from any client, until the attestation
+  expires. Keycloak also writes both headers to its DEBUG log, so keep DEBUG
+  off for Keycloak's client authenticators in production. Still open
+  upstream as of 26.8.1: replay protection
+  ([keycloak#44770](https://github.com/keycloak/keycloak/issues/44770)),
+  challenges ([#44769](https://github.com/keycloak/keycloak/issues/44769)),
+  combined mode ([#51575](https://github.com/keycloak/keycloak/issues/51575))
+  and the DEBUG logging
+  ([#52508](https://github.com/keycloak/keycloak/issues/52508)).
 - **`alg` required in the attestation's `cnf.jwk`.** Keycloak 26.8.0 takes
   the PoP signature algorithm from the `alg` member of the attestation's
   `cnf.jwk` and does not infer it from the curve. If `alg` is missing, the
