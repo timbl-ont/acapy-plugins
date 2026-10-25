@@ -132,14 +132,10 @@ shared between the plugin and Keycloak, which isn't worth the key management.
 - **Client-driven token exchange** (RFC 8693 followed by RFC 7523).
   OID4VCI wallets send exactly one pre-authorized code token request to the
   AS listed in `authorization_servers`.
-- **Simplified built-in AS with ABCA written in-house.** Less infrastructure,
-  but attestation-based client authentication would have to be written and
-  maintained in-house. The built-in provider now covers DPoP; ABCA is
-  delegated to Keycloak.
 
 ## Future: authorization code flow
 
-The authorization code flow with an upstream IdP (e.g. Okta) uses standard
+The authorization code flow with an upstream IdP uses standard
 Keycloak identity brokering, with **no custom grant type**:
 
 ```mermaid
@@ -158,11 +154,11 @@ sequenceDiagram
   W->>P: /credential (token + DPoP proof)
 ```
 
-- **Okta** is registered once as an OIDC identity provider in Keycloak and
+- **The IdP** is registered once as an OIDC identity provider in Keycloak and
   never sees the wallet. An *Identity Provider Redirector* step skips
   Keycloak's own login page.
 - **Users:** first-broker-login auto-creates a linked shadow user. That is
-  fine here because Okta knows who the user is. IdP mappers copy Okta claims
+  fine here because the IdP knows who the user is. IdP mappers copy the IdP claims
   into the token.
 - **DPoP, ABCA, PKCE and PAR** are all native Keycloak features for this
   flow.
@@ -183,14 +179,14 @@ Gaps found in the Keycloak source:
 Binding the identity to the credential data:
 
 - **Issuer-initiated** (an offer with `issuer_state` = exchange id): the plugin
-  **must** check that the Okta identity in the token matches the exchange's
+  **must** check that the IdP identity in the token matches the exchange's
   subject. Otherwise anyone who intercepts the offer can log in as themselves
   and collect someone else's credential.
 - **Wallet-initiated:** no exchange exists yet. The plugin creates one from
   the token identity, for example through a controller callback that supplies
   the subject's data.
 
-If users already authenticate through an Okta-protected portal, that portal
+If users already authenticate through an IdP-protected portal, that portal
 can simply issue a pre-authorized code offer. The authorization code flow
 mainly adds value for wallet-initiated issuance.
 
