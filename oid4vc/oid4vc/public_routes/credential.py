@@ -203,7 +203,7 @@ async def _issue_cred_inner(context, token_result, refresh_id, req_body):
         )
 
     # Handle both OID4VCI 1.0 (credential_identifier/credential_configuration_id)
-    # and draft spec (format). Return spec-correct error codes per OID4VCI 1.0 §7.3.1.
+    # and draft spec (format). Error codes per OID4VCI 1.0 §8.3.1.2.
     if credential_identifier:
         # OID4VCI 1.0: Match by credential_identifier or credential_configuration_id.
         if supported.identifier != credential_identifier:
@@ -211,13 +211,13 @@ async def _issue_cred_inner(context, token_result, refresh_id, req_body):
             if raw_credential_identifier:
                 raise oauth_error(
                     400,
-                    "invalid_credential_identifier",
+                    "unknown_credential_identifier",
                     "credential_identifier does not match offer",
                 )
             else:
                 raise oauth_error(
                     400,
-                    "invalid_credential_configuration",
+                    "unknown_credential_configuration",
                     "credential_configuration_id is not supported",
                 )
     else:

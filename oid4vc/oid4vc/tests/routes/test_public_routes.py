@@ -774,3 +774,41 @@ async def test_issue_cred(monkeypatch, context, dummy_request):
     # Parse the JSON response body
     data = json.loads(resp.text)
     assert "credentials" in data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field, error",
+    [
+        ("credential_configuration_id", "unknown_credential_configuration"),
+        ("credential_identifier", "unknown_credential_identifier"),
+    ],
+)
+async def test_issue_cred_unknown_configuration_or_identifier(
+    monkeypatch, context, dummy_request, field, error
+):
+    """OID4VCI 1.0 §8.3.1.2 error codes for a configuration / identifier not offered."""
+    token_result = MagicMock(exchange_key="refresh_id", payload={"sub": "refresh_id"})
+    monkeypatch.setattr(
+        "oid4vc.public_routes.credential.check_token",
+        AsyncMock(return_value=token_result),
+    )
+    ex_record = MagicMock(spec=OID4VCIExchangeRecord)
+    ex_record.supported_cred_id = "cred_id"
+    monkeypatch.setattr(
+        "oid4vc.public_routes.credential.OID4VCIExchangeRecord.retrieve_by_refresh_id",
+        AsyncMock(return_value=ex_record),
+    )
+    supported = MagicMock(spec=SupportedCredential)
+    supported.identifier = "MyCred"
+    supported.format = "jwt_vc_json"
+    monkeypatch.setattr(
+        "oid4vc.public_routes.credential.SupportedCredential.retrieve_by_id",
+        AsyncMock(return_value=supported),
+    )
+
+    req = dummy_request(json_data={field: "NotOffered"})
+    req.headers = {"Authorization": "Bearer testtoken"}
+    resp = await issue_cred(req)
+    assert resp.status == 400
+    assert json.loads(resp.text)["error"] == error
