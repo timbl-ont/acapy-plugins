@@ -6,10 +6,10 @@ authorization server, via `demo-keycloak`.
 **Plan:** OpenID for Verifiable Credential Issuance 1.0 Final: Test an issuer – alpha
 tests (`oid4vci-1_0-issuer-test-plan`), plan `kVTR0KuqH9XtY`.
 
-**Run 1 (all 14 modules):** F3 (x5chain) in every issuing module; F6 in modules 12–13.
+**Run 1 (all 14 modules):** F2 (x5chain) in every issuing module; F5 in modules 12–13.
 
-**Run 2 (after the demo rebuild with the new certificates and the F6 fix):** all modules
-pass except module 4 (F4, open); modules 7 and 10 skip (features not supported).
+**Run 2 (after the demo rebuild with the new certificates and the F5 fix):** all modules
+pass except module 4 (F3, open); modules 7 and 10 skip (features not supported).
 
 **Variants:** `vci`, `mdoc`, `pre_authorization_code`, `issuer_initiated`, `simple`,
 `private_key_jwt`, `dpop`, `unsigned`, `plain` (credential response encryption).
@@ -28,30 +28,30 @@ endpoints, new IACA trust anchor).
 |---|---|---|---|---|
 | 1 | metadata-test | PASSED | PASSED | F1 fixed before run 1 |
 | 2 | metadata-test-signed | PASSED | PASSED | F1 fixed before run 1 |
-| 3 | happy-flow | FAILED | PASSED | F3 fixed |
-| 4 | happy-flow-additional-requests | FAILED | FAILED | F4 open; F3 fixed |
-| 5 | happy-flow-multiple-clients | FAILED | PASSED | F3 fixed |
-| 6 | happy-flow-skip-notification | FAILED | PASSED | F3 fixed |
-| 7 | batch-issuance | SKIPPED | SKIPPED | F8 (not supported) |
+| 3 | happy-flow | FAILED | PASSED | F2 fixed |
+| 4 | happy-flow-additional-requests | FAILED | FAILED | F3 open; F2 fixed |
+| 5 | happy-flow-multiple-clients | FAILED | PASSED | F2 fixed |
+| 6 | happy-flow-skip-notification | FAILED | PASSED | F2 fixed |
+| 7 | batch-issuance | SKIPPED | SKIPPED | F7 (not supported) |
 | 8 | fail-invalid-nonce | PASSED | PASSED | |
 | 9 | fail-invalid-jwt-proof-signature | PASSED | PASSED | |
-| 10 | fail-invalid-key-attestation-signature | SKIPPED | SKIPPED | F7 (not supported) |
+| 10 | fail-invalid-key-attestation-signature | SKIPPED | SKIPPED | F6 (not supported) |
 | 11 | fail-missing-proof | PASSED | PASSED | |
-| 12 | fail-unknown-credential-configuration | FAILED | PASSED | F6 fixed |
-| 13 | fail-unknown-credential-identifier | FAILED | PASSED | F6 fixed |
-| 14 | fail-on-access-token-in-query | FAILED | PASSED | F3 fixed |
+| 12 | fail-unknown-credential-configuration | FAILED | PASSED | F5 fixed |
+| 13 | fail-unknown-credential-identifier | FAILED | PASSED | F5 fixed |
+| 14 | fail-on-access-token-in-query | FAILED | PASSED | F2 fixed |
 
 ## Findings
 
 | ID | Severity | Area | Summary | Status |
 |---|---|---|---|---|
 | F1 | Warning | Demo data | `background_image.alt_text` in issuer metadata | Fixed (demo) |
-| F3 | Failure + 2 warnings | Demo certificate | Trust anchor in mdoc `x5chain`; IACA/DS profile | Fixed (demo); verified in run 2 |
-| F4 | 2 × Failure | Plugin (`/credential`) | Repeat credential requests with the same access token rejected | Open (pre-existing on `main`) |
-| F5 | Warning | Deployment (ngrok) | TLS 1.2 cipher outside BCP 195 accepted | Not the plugin |
-| F6 | Failure | Plugin (`/credential`) | Non-standard error codes for unknown configuration / identifier | Fixed; verified in run 2 |
-| F7 | Skipped | Plugin (not supported) | Key attestation (`key_attestations_required`) | Not supported |
-| F8 | Skipped | Plugin (not supported) | Batch issuance (`batch_credential_issuance`) | Not supported (permitted) |
+| F2 | Failure + 2 warnings | Demo certificate | Trust anchor in mdoc `x5chain`; IACA/DS profile | Fixed (demo); verified in run 2 |
+| F3 | 2 × Failure | Plugin (`/credential`) | Repeat credential requests with the same access token rejected | Open (pre-existing on `main`) |
+| F4 | Warning | Deployment (ngrok) | TLS 1.2 cipher outside BCP 195 accepted | Not the plugin |
+| F5 | Failure | Plugin (`/credential`) | Non-standard error codes for unknown configuration / identifier | Fixed; verified in run 2 |
+| F6 | Skipped | Plugin (not supported) | Key attestation (`key_attestations_required`) | Not supported |
+| F7 | Skipped | Plugin (not supported) | Batch issuance (`batch_credential_issuance`) | Not supported (permitted) |
 
 ### F1 – Unknown property in credential issuer metadata (fixed)
 
@@ -65,7 +65,7 @@ endpoints, new IACA trust anchor).
 - **Fix:** removed `alt_text` in `demo/frontend/index.js`. After the demo
   restart, both metadata tests pass.
 
-### F3 – Trust anchor included in the mdoc x5chain (fixed)
+### F2 – Trust anchor included in the mdoc x5chain (fixed)
 
 - **Modules:** happy-flow, happy-flow-additional-requests.
 - **Failure:** `ValidateMdocDsCertificateChain`: "Trust anchor certificate must not be
@@ -82,7 +82,7 @@ endpoints, new IACA trust anchor).
 - **Verified:** run 2 passes the x5chain and certificate profile checks with the new
   certificates.
 
-### F4 – Same access token rejected for further credential requests (open)
+### F3 – Same access token rejected for further credential requests (open)
 
 - **Module:** happy-flow-additional-requests (2 failures, `EnsureHttpStatusCodeIsAnyOf`,
   OID4VCI 1.0 §8.3; expected 200/202, got 400).
@@ -100,7 +100,7 @@ endpoints, new IACA trust anchor).
   offer.
 - **Decision:** pending (separate PR proposed).
 
-### F5 – TLS cipher warning (deployment)
+### F4 – TLS cipher warning (deployment)
 
 - **Module:** happy-flow-additional-requests.
 - **Check:** `RequireOnlyBCP195RecommendedCiphersForTLS12` (RFC 9325 §4.2): the issuer
@@ -108,7 +108,7 @@ endpoints, new IACA trust anchor).
 - **Cause:** TLS is terminated by ngrok, not the plugin. A production deployment's TLS
   terminator should allow only BCP 195 ciphers.
 
-### F6 – Non-standard credential error codes (fixed)
+### F5 – Non-standard credential error codes (fixed)
 
 - **Module:** fail-unknown-credential-configuration (module 13,
   fail-unknown-credential-identifier, is expected to fail the same way).
@@ -124,7 +124,7 @@ endpoints, new IACA trust anchor).
   `unknown_credential_identifier`; unit tests added for both. Modules 12 and 13 pass in
   run 2.
 
-### F7 – Key attestation not supported (skipped)
+### F6 – Key attestation not supported (skipped)
 
 - **Module:** fail-invalid-key-attestation-signature (module 10), skipped in both runs: "This
   test requires key attestation. The selected credential configuration uses 'jwt' proof
@@ -134,7 +134,7 @@ endpoints, new IACA trust anchor).
   Don't push an offer to this module.
 - Revisit when the issuer supports key attestation.
 
-### F8 – Batch issuance not supported (skipped)
+### F7 – Batch issuance not supported (skipped)
 
 - **Module:** batch-issuance (module 7), skipped in both runs: the issuer metadata has no
   `batch_credential_issuance`, which the suite accepts as permitted behaviour.
