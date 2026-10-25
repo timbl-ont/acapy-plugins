@@ -53,17 +53,20 @@ endpoints, new IACA trust anchor).
 | F6 | Skipped | Plugin (not supported) | Key attestation (`key_attestations_required`) | Not supported |
 | F7 | Skipped | Plugin (not supported) | Batch issuance (`batch_credential_issuance`) | Not supported (permitted) |
 
-### F1 – Unknown property in credential issuer metadata (fixed)
+### F1 – Undefined parameter in credential issuer metadata (fixed)
 
 - **Modules:** metadata-test, metadata-test-signed (plan 1).
 - **Check:** `CheckForUnexpectedParametersInCredentialIssuerMetadata` (OID4VCI 1.0
   §12.2.3, §12.2.4).
 - **Cause:** the demo's mDL configuration had `alt_text` in
-  `credential_metadata.display[].background_image`, which only defines `uri`. The schema
-  failure also made the suite list `cryptographic_binding_methods_supported` and
-  `proof_types_supported` as unknown (cascade).
-- **Fix:** removed `alt_text` in `demo/frontend/index.js`. After the demo
-  restart, both metadata tests pass.
+  `credential_metadata.display[].background_image`. OID4VCI 1.0 §12.2.4 defines
+  `alt_text` for `logo` but only `uri` for `background_image`. The spec's parameter
+  lists are non-exhaustive, so this is not a spec violation; the suite warns on any
+  parameter the spec does not define. The same warning also listed
+  `cryptographic_binding_methods_supported` and `proof_types_supported` as unexpected,
+  a side effect of the undefined member.
+- **Fix:** removed `alt_text` from `background_image` in `demo/frontend/index.js`
+  (`logo.alt_text` is still fine). After the demo restart, both metadata tests pass.
 
 ### F2 – Trust anchor included in the mdoc x5chain (fixed)
 

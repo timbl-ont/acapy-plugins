@@ -185,7 +185,7 @@ async function issue_jwt_credential(req, res) {
             name: "University Credential",
             locale: "en-US",
             logo: {
-             url: "https://w3c-ccg.github.io/vc-ed/plugfest-1-2022/images/JFF_LogoLockup.png",
+              uri: "https://w3c-ccg.github.io/vc-ed/plugfest-1-2022/images/JFF_LogoLockup.png",
               alt_text: "a square logo of a university",
             },
             background_color: "#12107c",
@@ -742,7 +742,8 @@ async function issue_mdoc_credential(req, res) {
             background_image: {
               // Must be complete base64: wallets such as Multipaz decode data: URIs
               // while loading the offer, and a truncated value makes that fail.
-              // OID4VCI 1.0 §12.2.4: background_image has only "uri" (no alt_text).
+              // OID4VCI 1.0 §12.2.4 defines only "uri" here (alt_text is defined for
+              // logo); the OpenID conformance suite warns on undefined members.
               uri: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
             }
           }
