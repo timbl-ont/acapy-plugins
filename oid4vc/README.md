@@ -359,7 +359,7 @@ To issue a credential using OpenID4VCI, the Issuer must first prepare credential
       "name": "University Credential",
       "locale": "en-US",
       "logo": {
-        "url": "https://w3c-ccg.github.io/vc-ed/plugfest-1-2022/images/JFF_LogoLockup.png",
+        "uri": "https://w3c-ccg.github.io/vc-ed/plugfest-1-2022/images/JFF_LogoLockup.png",
         "alt_text": "a square logo of a university"
       },
       "background_color": "#12107C",
@@ -423,7 +423,7 @@ When the Controller sets up a Supported Credential record using the Admin API, t
           "name": "University Credential",
           "locale": "en-US",
           "logo": {
-            "url": "https://w3c-ccg.github.io/vc-ed/plugfest-1-2022/images/JFF_LogoLockup.png",
+            "uri": "https://w3c-ccg.github.io/vc-ed/plugfest-1-2022/images/JFF_LogoLockup.png",
             "alt_text": "a square logo of a university"
           },
           "background_color": "#12107c",
