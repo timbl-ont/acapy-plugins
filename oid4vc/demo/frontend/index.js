@@ -641,6 +641,8 @@ async function issue_mdoc_credential(req, res) {
     family_name,
     given_name,
     birth_date,
+    birth_place,
+    sex,
     issue_date,
     expiry_date,
     issuing_authority,
@@ -648,7 +650,23 @@ async function issue_mdoc_credential(req, res) {
     issuing_country,
     un_distinguishing_sign,
     portrait,
+    resident_address,
+    resident_city,
+    resident_state,
+    resident_postal_code,
+    resident_country,
   } = req.body;
+
+  const sexInt = parseInt(sex, 10);
+  // age_over_NN: true from the NNth birthday on (calendar date, UTC).
+  const birth = new Date(birth_date);
+  const ageOver = (years) =>
+    Date.now() >=
+    Date.UTC(birth.getUTCFullYear() + years, birth.getUTCMonth(), birth.getUTCDate());
+  const age_over_18 = ageOver(18);
+  const age_over_19 = ageOver(19);
+  const age_over_21 = ageOver(21);
+  const age_over_65 = ageOver(65);
 
   const headers = {
     accept: "application/json",
@@ -704,7 +722,18 @@ async function issue_mdoc_credential(req, res) {
           { path: ["org.iso.18013.5.1", "document_number"], display: [{ name: "Document Number", locale: "en-US" }] },
           { path: ["org.iso.18013.5.1", "issuing_country"], display: [{ name: "Issuing Country", locale: "en-US" }] },
           { path: ["org.iso.18013.5.1", "un_distinguishing_sign"], display: [{ name: "UN Distinguishing Sign", locale: "en-US" }] },
-          { path: ["org.iso.18013.5.1", "portrait"], display: [{ name: "Portrait", locale: "en-US" }] }
+          { path: ["org.iso.18013.5.1", "portrait"], display: [{ name: "Portrait", locale: "en-US" }] },
+          { path: ["org.iso.18013.5.1", "age_over_18"], display: [{ name: "Age Over 18", locale: "en-US" }] },
+          { path: ["org.iso.18013.5.1", "age_over_19"], display: [{ name: "Age Over 19", locale: "en-US" }] },
+          { path: ["org.iso.18013.5.1", "age_over_21"], display: [{ name: "Age Over 21", locale: "en-US" }] },
+          { path: ["org.iso.18013.5.1", "age_over_65"], display: [{ name: "Age Over 65", locale: "en-US" }] },
+          { path: ["org.iso.18013.5.1", "birth_place"], display: [{ name: "Birth Place", locale: "en-US" }] },
+          { path: ["org.iso.18013.5.1", "sex"], display: [{ name: "Sex", locale: "en-US" }] },
+          { path: ["org.iso.18013.5.1", "resident_address"], display: [{ name: "Resident Address", locale: "en-US" }] },
+          { path: ["org.iso.18013.5.1", "resident_city"], display: [{ name: "Resident City", locale: "en-US" }] },
+          { path: ["org.iso.18013.5.1", "resident_state"], display: [{ name: "Resident State", locale: "en-US" }] },
+          { path: ["org.iso.18013.5.1", "resident_postal_code"], display: [{ name: "Resident Postal Code", locale: "en-US" }] },
+          { path: ["org.iso.18013.5.1", "resident_country"], display: [{ name: "Resident Country", locale: "en-US" }] }
         ],
         display: [
           {
@@ -754,6 +783,17 @@ async function issue_mdoc_credential(req, res) {
           document_number,
           portrait,
           un_distinguishing_sign,
+          age_over_18,
+          age_over_19,
+          age_over_21,
+          age_over_65,
+          birth_place,
+          sex: sexInt,
+          resident_address,
+          resident_city,
+          resident_state,
+          resident_postal_code,
+          resident_country,
         }
       },
       verification_method: issuerDID + "#0",
