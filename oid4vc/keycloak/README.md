@@ -289,17 +289,30 @@ Revoking refresh tokens, if ever needed:
 - all refreshes: disable the holder user, or set `oid4vci.refresh.tokens` to
   `false`.
 
-**Anonymous wallets.** A wallet that used the anonymous client never learned
-that client's id, so its refresh request has no usable `client_id`, and
-Keycloak's client authentication would reject it. The
-`oid4vci-refresh-client-hint` client authenticator recognises this
-extension's refresh tokens issued to a *public* client and supplies the
-client id from the token's `azp`. Keycloak's own "Client Id and Secret"
-authenticator then identifies the public client as usual. A wallet that sent
-a `client_id` naming a public client of the realm is given that client, and
-refreshes with the same `client_id`. A wallet that sends an unknown
-`client_id` when refreshing is rejected; register a public client with that
-id.
+**Wallets without attestation.** When attestation is not required, the
+token request picks the wallet's client from the `client_id` it sends, and
+that decides what the wallet must send when it refreshes:
+
+| `client_id` in the token request | Token issued to | `client_id` in the refresh request |
+|---|---|---|
+| A public client of the realm | That client | The same `client_id` |
+| None | The anonymous client | None |
+| One the realm doesn't know | The anonymous client | None; the wallet's own `client_id` fails |
+
+Keycloak has to identify the client on every refresh request, but the
+token response never tells the wallet the anonymous client's id. The
+`oid4vci-refresh-client-hint` authenticator fills that gap: when a refresh
+request has no `client_id`, it takes the client from the refresh token's
+`azp` claim. It only does this for this extension's refresh tokens issued to
+a public client. Keycloak's "Client Id and Secret" authenticator then
+identifies the client as usual.
+
+The hint can't help a wallet that sends a `client_id` the realm doesn't
+know. Keycloak looks that id up, doesn't find it, and rejects the refresh.
+To support such a wallet, register a public client with its `client_id`
+(set up like the anonymous client). Its next token request then gets that
+client, and refreshes work. Refresh tokens it already holds were issued to
+the anonymous client and still fail, so the wallet needs a new offer.
 
 ## Configuring the plugin
 
@@ -528,9 +541,11 @@ reference authorization server.
   accepted as its first. The tokens stay valid and bound to the wallet's key.
 - **Wallet behaviour.** With attestation required, wallets must send
   `client_id` and the ABCA headers in the pre-authorized code token request.
-  Wallets without attestation need `oid4vci.require.client.attestation=false`
-  and `oid4vci.anonymous.client.id`; their `client_id`, if sent, is not
-  authenticated and is only logged.
+  Wallets without attestation need `oid4vci.require.client.attestation=false`.
+  A wallet whose `client_id` names a public client of the realm gets that
+  client. Any other wallet gets the anonymous client
+  (`oid4vci.anonymous.client.id`), and its `client_id`, if sent, is only
+  logged. See [Refresh tokens](#refresh-tokens) for how each refreshes.
 - **AS metadata.** Keycloak's discovery document does not list the custom
   grant in `grant_types_supported`. Most wallets just use the
   `token_endpoint`.
