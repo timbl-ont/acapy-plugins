@@ -113,6 +113,11 @@ let sdJwtSupportedCredID = "";
 let mdocSupportedCredID = "";
 let jwtStatusListID = "";
 let sdJwtStatusListID = "";
+// refresh_id of the last SD-JWT exchange, to pre-fill the refresh form
+let lastSdJwtRefreshId = "";
+
+const escapeHtml = (text) =>
+  String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 
 //    ###     ######     ###            ########  ##    ##
@@ -551,7 +556,7 @@ async function issue_sdjwt_credential(req, res) {
   };
 
   const isRefresh = req.body['is-refresh'] === 'on';
-  const refreshId = req.body['refresh-id'];
+  const refreshId = (req.body['refresh-id'] || "").trim();
 
   const exchangeCreateOptions = {
     did: issuerDID,
@@ -573,10 +578,23 @@ async function issue_sdjwt_credential(req, res) {
   
   let exchangeId;
   if (isRefresh) {
-    const refreshUrl = `${API_BASE_URL}/oid4vci/credential-refresh/${refreshId}`;
+    if (!refreshId) {
+      events.emit(`issuance-${req.body.registrationId}`, {type: "message", message: "<b>Credential refresh failed:</b> enter the Refresh ID of the credential to refresh."});
+      return;
+    }
+    const refreshUrl = `${API_BASE_URL}/oid4vci/credential-refresh/${encodeURIComponent(refreshId)}`;
     events.emit(`issuance-${req.body.registrationId}`, {type: "message", message: `Posting Credential Refresh Request to: ${refreshUrl}`});
     events.emit(`issuance-${req.body.registrationId}`, {type: "debug-message", message: "Request options", data: exchangeCreateOptions});
-    const exchangeResponse = await axios.patch(refreshUrl, exchangeCreateOptions);
+    let exchangeResponse;
+    try {
+      exchangeResponse = await axios.patch(refreshUrl, exchangeCreateOptions);
+    } catch (err) {
+      const status = err.response?.status ?? "no response";
+      const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+      logger.error(`Credential refresh for ${refreshId} failed: ${status} ${detail}`);
+      events.emit(`issuance-${req.body.registrationId}`, {type: "message", message: `<b>Credential refresh failed</b> (${status}): ${escapeHtml(detail)}`});
+      return;
+    }
     exchangeId = exchangeResponse.data.exchange_id;
   } else {
     const exchangeCreateUrl = `${API_BASE_URL}/oid4vci/exchange/create`;
@@ -585,6 +603,7 @@ async function issue_sdjwt_credential(req, res) {
     events.emit(`issuance-${req.body.registrationId}`, {type: "debug-message", message: "Request options", data: exchangeCreateOptions});
     const exchangeResponse = await axios.post(exchangeCreateUrl, exchangeCreateOptions);
     exchangeId = exchangeResponse.data.exchange_id;
+    lastSdJwtRefreshId = exchangeResponse.data.refresh_id || lastSdJwtRefreshId;
   }
   events.emit(`issuance-${req.body.registrationId}`, {type: "message", message: `Received Credential Exchange ID: ${exchangeId}`});
 
@@ -627,7 +646,7 @@ async function issue_sdjwt_credential(req, res) {
     // Polling for the credential is an option at this stage, but we opt to just listen for the appropriate webhook instead
     events.emit(`issuance-${req.body.registrationId}`, {type: "message", message: "Begin listening for credential to be issued."});
   } else {
-    events.emit(`issuance-${req.body.registrationId}`, {type: "message", message: "Credential Refresh API call was successful."});
+    events.emit(`issuance-${req.body.registrationId}`, {type: "message", message: `Credential refresh prepared for Refresh ID ${escapeHtml(refreshId)}. Refresh the credential in the wallet to receive it.`});
   }
 }
 
@@ -1842,7 +1861,7 @@ app.get("/issue", (req, res) => {
 });
 app.get("/issue/select", (req, res) => {
   console.log(req.query);
-  res.render(`issue/${req.query["credential-type"]}`, {"page": "register", "registrationId": uuidv4()});
+  res.render(`issue/${req.query["credential-type"]}`, {"page": "register", "registrationId": uuidv4(), "lastRefreshId": lastSdJwtRefreshId});
 });
 
 app.post("/issue", (req, res, next) => {
