@@ -76,9 +76,13 @@ public class OID4VCIPreAuthGrantType extends OAuth2GrantTypeBase {
 
     private static final Logger LOGGER = Logger.getLogger(OID4VCIPreAuthGrantType.class);
 
+    /** A client_id the realm doesn't know, sent by a wallet that got the anonymous client. */
+    private String unregisteredWalletClientId;
+
     @Override
     public Response process(Context context) {
         setContext(context);
+        unregisteredWalletClientId = null;
         OID4VCIPreAuthConfig config = OID4VCIPreAuthConfig.of(realm);
         if (!config.isComplete()) {
             LOGGER.errorf("Realm '%s' is missing %s / %s", realm.getName(),
@@ -164,6 +168,12 @@ public class OID4VCIPreAuthGrantType extends OAuth2GrantTypeBase {
                 TokenManager.attachAuthenticationSession(session, userSession, authSession);
         if (clientAuthAttributes != null) {
             updateUserSessionFromClientAuth(userSession);
+        }
+        if (unregisteredWalletClientId != null) {
+            // Recorded in the refresh token, so the wallet can refresh with the
+            // same client_id (OID4VCIRefreshClientHintAuthenticator).
+            clientSessionCtx.setAttribute(OID4VCIPreAuthRefreshTokenProvider.WALLET_CLIENT_ID_ATTR,
+                    unregisteredWalletClientId);
         }
 
         // authorization_details for the response (OID4VCI §6.2): each entry
@@ -253,13 +263,18 @@ public class OID4VCIPreAuthGrantType extends OAuth2GrantTypeBase {
         if (!presentsCredentials && !knownPublicClient && !config.requireClientAttestation
                 && config.anonymousClientId != null) {
             // No client authentication: use the public anonymous client. The
-            // wallet's own client_id (if any) is unauthenticated, so it is only
-            // passed to the plugin for logging.
+            // wallet's own client_id (if any) is unauthenticated: it is passed to
+            // the plugin for logging and, if the realm doesn't know it, recorded
+            // in the refresh token.
             client = realm.getClientByClientId(config.anonymousClientId);
             if (client == null || !client.isEnabled() || !client.isPublicClient()) {
                 event.error(Errors.CLIENT_NOT_FOUND);
                 throw error(OAuthErrorException.INVALID_CLIENT, "Anonymous client is not available",
                         Response.Status.UNAUTHORIZED);
+            }
+            if (requestedClientId != null && !requestedClientId.isBlank() && requested == null) {
+                unregisteredWalletClientId = requestedClientId;
+                event.detail(OID4VCIRefreshClientHintAuthenticator.WALLET_CLIENT_ID_DETAIL, requestedClientId);
             }
             clientConfig = OIDCAdvancedConfigWrapper.fromClientModel(client);
             clientAuthAttributes = Map.of();

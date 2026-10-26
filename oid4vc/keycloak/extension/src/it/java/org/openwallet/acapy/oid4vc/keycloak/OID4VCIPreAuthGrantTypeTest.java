@@ -65,7 +65,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Covers the anonymous (attestation off) path: DPoP requirement, redemption and
  * its client assertion, access token claims and binding, authorization_details,
  * refresh tokens (claims carried over, key binding, rotation) and the refresh
- * client hint.
+ * client hint (no client_id, or the unregistered client_id of the token request).
  * Attestation-based client authentication is covered by the end-to-end test in
  * {@code oid4vc/keycloak/e2e}.
  */
@@ -80,6 +80,8 @@ public class OID4VCIPreAuthGrantTypeTest {
     static final String REFRESH_ID = "refresh-" + UUID.randomUUID();
     static final String PRE_AUTH_GRANT = "urn:ietf:params:oauth:grant-type:pre-authorized_code";
     static final String OFFERED_CONFIGURATION = "MyCred";
+    /** A client_id the realm doesn't know, as wallets often send. */
+    static final String WALLET_APP = "some-wallet-app";
 
     @InjectHttpServer
     HttpServer httpServer;
@@ -312,7 +314,52 @@ public class OID4VCIPreAuthGrantTypeTest {
         assertEquals(REFRESH_ID, claims((String) json(response.body()).get("access_token")).get("refresh_id"));
     }
 
+    @Test
+    public void refreshClientHintAcceptsTheUnregisteredClientIdOfTheTokenRequest() throws Exception {
+        installRefreshClientHint();
+        Wallet wallet = new Wallet();
+        Map<?, ?> token = json(tokenRequest(wallet, true, null, WALLET_APP).body());
+        Map<?, ?> access = claims((String) token.get("access_token"));
+        assertEquals(ANONYMOUS_CLIENT, access.get("azp"));
+        assertNull(access.get("wallet_client_id"), "not in access tokens");
+        String refreshToken = (String) token.get("refresh_token");
+        assertEquals(WALLET_APP, claims(refreshToken).get("wallet_client_id"));
+
+        HttpResponse<String> refreshed = refreshRequest(wallet, refreshToken, WALLET_APP);
+        assertEquals(200, refreshed.statusCode(), refreshed.body());
+        Map<?, ?> refreshedToken = json(refreshed.body());
+        Map<?, ?> refreshedAccess = claims((String) refreshedToken.get("access_token"));
+        assertEquals(REFRESH_ID, refreshedAccess.get("refresh_id"));
+        assertEquals(ANONYMOUS_CLIENT, refreshedAccess.get("azp"));
+        assertNull(refreshedAccess.get("wallet_client_id"), "not in access tokens");
+
+        // Kept on rotation
+        String rotated = (String) refreshedToken.get("refresh_token");
+        assertEquals(WALLET_APP, claims(rotated).get("wallet_client_id"));
+        HttpResponse<String> again = refreshRequest(wallet, rotated, WALLET_APP);
+        assertEquals(200, again.statusCode(), again.body());
+    }
+
+    @Test
+    public void refreshWithAnotherUnregisteredClientIdIsRejected() throws Exception {
+        installRefreshClientHint();
+        Wallet wallet = new Wallet();
+        String refreshToken = (String) json(tokenRequest(wallet, true, null, WALLET_APP).body()).get("refresh_token");
+        assertInvalidClient(refreshRequest(wallet, refreshToken, "another-wallet-app"));
+
+        // A token request without client_id records none, so no unknown client_id matches.
+        Wallet other = new Wallet();
+        String withoutClientId = (String) json(tokenRequest(other, true).body()).get("refresh_token");
+        assertNull(claims(withoutClientId).get("wallet_client_id"));
+        assertInvalidClient(refreshRequest(other, withoutClientId, WALLET_APP));
+    }
+
     // --- Helpers ----------------------------------------------------------------------------------------------
+
+    private static void assertInvalidClient(HttpResponse<String> response) throws IOException {
+        assertEquals(401, response.statusCode(), response.body());
+        assertEquals("invalid_client", json(response.body()).get("error"));
+    }
 
     /** The hint authenticator must run first in a copy of the built-in "clients" flow. */
     private void installRefreshClientHint() {
@@ -346,12 +393,20 @@ public class OID4VCIPreAuthGrantTypeTest {
 
     private HttpResponse<String> tokenRequest(Wallet wallet, boolean withDpop, String authorizationDetails)
             throws Exception {
+        return tokenRequest(wallet, withDpop, authorizationDetails, null);
+    }
+
+    private HttpResponse<String> tokenRequest(Wallet wallet, boolean withDpop, String authorizationDetails,
+                                              String clientId) throws Exception {
         Map<String, String> form = new LinkedHashMap<>();
         form.put("grant_type", PRE_AUTH_GRANT);
         form.put("pre-authorized_code", "code-1");
         form.put("tx_code", "1234");
         if (authorizationDetails != null) {
             form.put("authorization_details", authorizationDetails);
+        }
+        if (clientId != null) {
+            form.put("client_id", clientId);
         }
         return post(form, withDpop ? wallet.dpopProof(tokenEndpoint()) : null);
     }

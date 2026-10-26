@@ -14,23 +14,34 @@ import org.keycloak.authentication.authenticators.client.AttestationBasedClientA
 import org.keycloak.models.AuthenticationExecutionModel;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.RealmModel;
 import org.keycloak.provider.ProviderConfigProperty;
 import org.keycloak.representations.RefreshToken;
 
 /**
- * Client identification hint for refresh requests from wallets without client
- * authentication.
+ * Client identification hint for refresh requests from wallets that got the
+ * anonymous client.
  * <p>
  * A wallet that used the anonymous public client never learned that client's
- * id, so its refresh request has no usable {@code client_id} and Keycloak's
- * client authentication would reject it. For a {@code refresh_token} request
- * carrying one of this extension's refresh tokens issued to a <em>public</em>
- * client, this authenticator sets the {@code client_id} session attribute from
- * the token's {@code azp}; Keycloak's default {@code client-secret}
- * authenticator, which identifies public clients, falls back to that attribute
- * when the request has no {@code client_id}. It never authenticates a client
- * itself. Identifying a public client from its signed, DPoP-bound refresh token
- * is no weaker than the client sending its {@code client_id}.
+ * id. For a {@code refresh_token} request carrying one of this extension's
+ * refresh tokens issued to a <em>public</em> client, this authenticator helps
+ * Keycloak's default {@code client-secret} authenticator ("Client Id and
+ * Secret"), which identifies public clients, find the token's client ({@code azp}):
+ * <ul>
+ *   <li>no {@code client_id}: it sets the {@code client_id} session attribute,
+ *       which that authenticator falls back to;</li>
+ *   <li>a {@code client_id} the realm doesn't know: only if it is the one the
+ *       wallet sent in its token request, recorded in the refresh token
+ *       ({@link OID4VCIPreAuthRefreshTokenProvider#WALLET_CLIENT_ID_CLAIM}), it
+ *       replaces the request's {@code client_id} with the token's client. Any other
+ *       unknown {@code client_id} is left alone and rejected as usual, so the
+ *       refresh token is only accepted with the client_id it was issued for
+ *       (OAuth 2.1 §4.3.1).</li>
+ * </ul>
+ * It never authenticates a client itself, and a {@code client_id} naming a
+ * client of the realm is left to the normal client authentication. Identifying
+ * a public client from its signed, DPoP-bound refresh token is no weaker than
+ * the client sending its {@code client_id}.
  * <p>
  * Add it to the realm's client authentication flow ("clients") as ALTERNATIVE,
  * before "Client Id and Secret".
@@ -38,6 +49,8 @@ import org.keycloak.representations.RefreshToken;
 public class OID4VCIRefreshClientHintAuthenticator extends AbstractClientAuthenticator {
 
     public static final String PROVIDER_ID = "oid4vci-refresh-client-hint";
+    /** Event detail: the unregistered client_id a wallet used. */
+    static final String WALLET_CLIENT_ID_DETAIL = "wallet_client_id";
 
     @Override
     public void authenticateClient(ClientAuthenticationFlowContext context) {
@@ -45,10 +58,14 @@ public class OID4VCIRefreshClientHintAuthenticator extends AbstractClientAuthent
         if (form == null || !OAuth2Constants.REFRESH_TOKEN.equals(form.getFirst(OAuth2Constants.GRANT_TYPE))) {
             return;
         }
-        if (form.getFirst(OAuth2Constants.CLIENT_ID) != null
-                || context.getHttpRequest().getHttpHeaders().getHeaderString(HttpHeaders.AUTHORIZATION) != null
-                || context.getHttpRequest().getHttpHeaders().getHeaderString(
-                        AttestationBasedClientAuthenticator.OAUTH_CLIENT_ATTESTATION_HEADER) != null) {
+        HttpHeaders headers = context.getHttpRequest().getHttpHeaders();
+        if (headers.getHeaderString(HttpHeaders.AUTHORIZATION) != null
+                || headers.getHeaderString(AttestationBasedClientAuthenticator.OAUTH_CLIENT_ATTESTATION_HEADER) != null) {
+            return;
+        }
+        RealmModel realm = context.getRealm();
+        String clientId = form.getFirst(OAuth2Constants.CLIENT_ID);
+        if (clientId != null && realm.getClientByClientId(clientId) != null) {
             return;
         }
         String encoded = form.getFirst(OAuth2Constants.REFRESH_TOKEN);
@@ -61,9 +78,18 @@ public class OID4VCIRefreshClientHintAuthenticator extends AbstractClientAuthent
                 || token.getIssuedFor() == null) {
             return;
         }
-        ClientModel client = context.getRealm().getClientByClientId(token.getIssuedFor());
-        if (client != null && client.isEnabled() && client.isPublicClient()) {
+        ClientModel client = realm.getClientByClientId(token.getIssuedFor());
+        if (client == null || !client.isEnabled() || !client.isPublicClient()) {
+            return;
+        }
+        if (clientId == null) {
             session.setAttribute(OAuth2Constants.CLIENT_ID, client.getClientId());
+        } else if (clientId.equals(token.getOtherClaims().get(OID4VCIPreAuthRefreshTokenProvider.WALLET_CLIENT_ID_CLAIM))) {
+            // "Client Id and Secret" reads client_id from the form before the
+            // session attribute. The request's parsed form parameters are cached
+            // for the whole request, so replacing the value here is what it sees.
+            form.putSingle(OAuth2Constants.CLIENT_ID, client.getClientId());
+            context.getEvent().detail(WALLET_CLIENT_ID_DETAIL, clientId);
         }
     }
 
@@ -80,7 +106,8 @@ public class OID4VCIRefreshClientHintAuthenticator extends AbstractClientAuthent
     @Override
     public String getHelpText() {
         return "Identifies the public client of an OID4VCI pre-authorized code refresh token when the wallet "
-                + "sends no client_id. Place before 'Client Id and Secret'.";
+                + "sends no client_id, or the unregistered client_id it used for the token request. "
+                + "Place before 'Client Id and Secret'.";
     }
 
     @Override

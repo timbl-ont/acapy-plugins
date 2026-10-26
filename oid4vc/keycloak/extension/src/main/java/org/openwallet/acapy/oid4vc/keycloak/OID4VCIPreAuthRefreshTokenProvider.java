@@ -60,6 +60,12 @@ import org.jboss.logging.Logger;
  * </ul>
  * Revoking a refresh token (revocation endpoint) marks its whole family revoked.
  * <p>
+ * A wallet that sent a {@code client_id} the realm doesn't know got the
+ * anonymous client; that {@code client_id} is recorded in the refresh token
+ * ({@value #WALLET_CLIENT_ID_CLAIM}) so the wallet can refresh with it
+ * ({@link OID4VCIRefreshClientHintAuthenticator}). It is not copied into access
+ * tokens.
+ * <p>
  * The rotation logic ({@link #validateTokenReuseForRefresh}, the rotation
  * record and its lock id) is adapted from Keycloak 26.8.0's
  * {@code org.keycloak.protocol.oid4vc.refresh.OID4VCIRefreshTokenProvider}
@@ -71,6 +77,10 @@ public class OID4VCIPreAuthRefreshTokenProvider extends AbstractRefreshTokenProv
 
     /** Client session context attribute marking requests handled by this provider. */
     static final String MARKER = OID4VCIPreAuthRefreshTokenProvider.class.getName();
+    /** Refresh token claim: the unregistered client_id the wallet sent in the token request. */
+    static final String WALLET_CLIENT_ID_CLAIM = "wallet_client_id";
+    /** Client session context attribute carrying {@link #WALLET_CLIENT_ID_CLAIM} to the new refresh token. */
+    static final String WALLET_CLIENT_ID_ATTR = MARKER + ".walletClientId";
     private static final String CLAIMS_ATTR = MARKER + ".claims";
     private static final String EXPIRY_ATTR = MARKER + ".exp";
     private static final String ROTATION_KEY_PREFIX = MARKER.toLowerCase() + ".rotation.";
@@ -119,6 +129,10 @@ public class OID4VCIPreAuthRefreshTokenProvider extends AbstractRefreshTokenProv
         // old refresh token (stashed by validateToken) on rotation.
         Map<String, Object> claims = exchangeClaims(clientSessionCtx, accessToken);
         refreshToken.getOtherClaims().putAll(claims);
+        String walletClientId = clientSessionCtx.getAttribute(WALLET_CLIENT_ID_ATTR, String.class);
+        if (walletClientId != null) {
+            refreshToken.setOtherClaims(WALLET_CLIENT_ID_CLAIM, walletClientId);
+        }
 
         Long expiry = clientSessionCtx.getAttribute(EXPIRY_ATTR, Long.class);
         if (expiry == null) {
@@ -205,6 +219,10 @@ public class OID4VCIPreAuthRefreshTokenProvider extends AbstractRefreshTokenProv
         }
         clientSessionCtx.setAttribute(CLAIMS_ATTR, claims);
         clientSessionCtx.setAttribute(EXPIRY_ATTR, oldToken.getExp());
+        // Kept on rotation, but not part of the claims copied onto the access token.
+        if (oldToken.getOtherClaims().get(WALLET_CLIENT_ID_CLAIM) instanceof String walletClientId) {
+            clientSessionCtx.setAttribute(WALLET_CLIENT_ID_ATTR, walletClientId);
+        }
 
         return new TokenManager.TokenValidation(user, userSession, clientSessionCtx);
     }
