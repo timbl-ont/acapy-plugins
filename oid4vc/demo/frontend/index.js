@@ -1417,7 +1417,7 @@ async function initializeAuthServer() {
       },
       { headers: commonHeaders }
     );
-    logger.info("Tenant created:", tenantRes.data);
+    logger.info(`Tenant created: ${JSON.stringify(tenantRes.data)}`);
 
     // Create key for tenant
     const notBefore = new Date();
@@ -1436,7 +1436,7 @@ async function initializeAuthServer() {
       },
       { headers: commonHeaders }
     );
-    logger.info("Key created:", keyRes.data);
+    logger.info(`Key created: ${JSON.stringify(keyRes.data)}`);
 
     // Create client for tenant
     const clientRes = await axios.post(
@@ -1448,10 +1448,13 @@ async function initializeAuthServer() {
       },
       { headers: commonHeaders }
     );
-    logger.info("Client created:", clientRes.data);
+    logger.info(`Client created: ${JSON.stringify(clientRes.data)}`);
 
   } catch (err) {
-    logger.error("Auth server initialization failed:", err?.response?.data || err.message);
+    // pino ignores extra arguments, so put the details in the message.
+    const status = err?.response?.status ?? "no response";
+    const detail = err?.response?.data ? JSON.stringify(err.response.data) : err.message;
+    logger.error(`Auth server initialization failed (${err?.config?.url ?? "auth server"}, ${status}): ${detail}`);
   }
 }
 

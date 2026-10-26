@@ -7,7 +7,8 @@ For the same demo with Keycloak as the authorization server, see
 This is a demo for developers to test and validate the current plugin functionality and to provide a fully working example of the functionality including w3c and ietf status lists. **Do not use for production deployments** 
 
 You will need NGROK to run this demo with a valid Authentication Token
-The .env file contains token secrets for the Auth Server
+The .env file contains token secrets for the Auth Server. `TENANT_SECRET` (the issuer's client
+secret at the Auth Server) must be at least 32 characters; the Auth Server rejects shorter ones.
 
 ```
 cp .env.example .env
