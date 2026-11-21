@@ -36,9 +36,9 @@ from oid4vc.pex import (
     PresentationSubmission,
 )
 
-from ..config import Config
 from ..cred_processor import CredProcessors
 from ..did_utils import retrieve_or_create_did_jwk
+from ..utils import oid4vp_response_uri
 from .constants import NONCE_BYTES
 
 LOGGER = logging.getLogger(__name__)
@@ -129,16 +129,6 @@ async def get_request(request: web.Request):
         raise web.HTTPBadRequest(reason=err.roll_up) from err
 
     now = int(time.time())
-    config = Config.from_settings(context.settings)
-    wallet_id = (
-        context.profile.settings.get("wallet.id")
-        if context.profile.settings.get("multitenant.enabled")
-        else None
-    )
-    subpath = f"/tenant/{wallet_id}" if wallet_id else ""
-    # Use OID4VP_ENDPOINT when available (may differ from the OID4VCI endpoint;
-    # e.g. behind a dedicated TLS-terminating proxy for conformance tests).
-    oid4vp_base = config.oid4vp_endpoint or config.endpoint
     payload = {
         "iss": effective_client_id,
         # NOTE: Do NOT include 'sub' equal to client_id in OID4VP JAR.
@@ -160,9 +150,10 @@ async def get_request(request: web.Request):
         # The x5c cert chain in the JWT header establishes the x509 binding.
         # Do NOT add a separate client_id_scheme parameter — it causes failures.
         "client_id": effective_client_id,
-        "response_uri": (
-            f"{oid4vp_base}{subpath}/oid4vp/response/{pres.presentation_id}"
-        ),
+        # Uses OID4VP_ENDPOINT when set (it may differ from the OID4VCI endpoint,
+        # e.g. behind a dedicated TLS-terminating proxy for conformance tests).
+        # The mdoc verifier rebuilds the session transcript from the same value.
+        "response_uri": oid4vp_response_uri(context.profile, pres.presentation_id),
         "state": pres.presentation_id,
         "nonce": pres.nonce,
         "id_token_signing_alg_values_supported": ["ES256", "EdDSA"],

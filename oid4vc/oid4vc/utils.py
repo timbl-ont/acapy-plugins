@@ -11,6 +11,7 @@ from acapy_agent.messaging.util import datetime_now
 from acapy_agent.storage.error import StorageNotFoundError
 from acapy_agent.wallet.util import b58_to_bytes, bytes_to_b64, str_to_b64, unpad
 
+from oid4vc.config import Config
 from oid4vc.jwt import jwt_sign
 from oid4vc.models.issuer_config import IssuerConfiguration
 from oid4vc.models.supported_cred import SupportedCredential
@@ -80,6 +81,20 @@ def get_tenant_subpath(profile: Profile, tenant_prefix: str = "/tenants") -> str
     )
     tenant_subpath = f"{tenant_prefix}/{wallet_id}" if wallet_id else ""
     return tenant_subpath
+
+
+def oid4vp_response_uri(profile: Profile, presentation_id: str) -> str:
+    """The ``response_uri`` of the OID4VP request for a presentation.
+
+    Uses ``OID4VP_ENDPOINT`` when configured, otherwise the OID4VCI endpoint.
+    The request object carries this value, and verifiers that rebuild it (the
+    mdoc session transcript, OpenID4VP 1.0 Appendix B.2.6.1) must use the same
+    value, so both call this function.
+    """
+    config = Config.from_settings(profile.settings)
+    base = config.oid4vp_endpoint or config.endpoint
+    subpath = get_tenant_subpath(profile, tenant_prefix="/tenant")
+    return f"{base}{subpath}/oid4vp/response/{presentation_id}"
 
 
 def public_request_url(config, request) -> str:

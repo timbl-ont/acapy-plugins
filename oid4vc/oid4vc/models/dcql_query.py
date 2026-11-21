@@ -198,6 +198,7 @@ class CredentialQuery(BaseModel):
         meta: Optional[CredentialMeta] = None,
         claims: Optional[List[ClaimsQuery]] = None,
         claim_sets: Optional[List[List[ClaimQueryID]]] = None,
+        require_cryptographic_holder_binding: Optional[bool] = None,
         **kwargs,
     ) -> None:
         """Initialize a CredentialQuery object."""
@@ -207,6 +208,7 @@ class CredentialQuery(BaseModel):
         self.meta = meta
         self.claims = claims
         self.claim_sets = claim_sets
+        self.require_cryptographic_holder_binding = require_cryptographic_holder_binding
 
 
 class CredentialQuerySchema(BaseModelSchema):
@@ -243,6 +245,16 @@ class CredentialQuerySchema(BaseModelSchema):
         CredentialMetaSchema(),
         required=False,
         metadata={"description": "Metadata about the Credential Query"},
+    )
+
+    require_cryptographic_holder_binding = fields.Bool(
+        required=False,
+        metadata={
+            "description": (
+                "Whether the Verifier requires a Cryptographic Holder Binding proof "
+                "(OpenID4VP 1.0 Section 6.1). Defaults to true when absent."
+            )
+        },
     )
 
     @validates_schema

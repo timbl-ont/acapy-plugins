@@ -128,6 +128,31 @@ Request body:
 }
 ```
 
+## Presentation Verification (OpenID4VP)
+
+An mdoc presentation is accepted only if issuer authentication and device
+authentication both succeed:
+
+- **Issuer authentication** checks the MSO signature against the configured
+  trust anchors. It proves the data is genuine.
+- **Device authentication** checks the holder's device-key signature over the
+  SessionTranscript. For OpenID4VP this is the `OpenID4VPHandover` (OpenID4VP
+  1.0 Appendix B.2.6.1), a hash of the request's `client_id`, `nonce` and
+  `response_uri`. Only this signature binds the presentation to the holder and
+  to this request, so without it a captured DeviceResponse could be replayed.
+
+The verifier rebuilds the transcript from the request the wallet received: the
+`client_id` stored on the presentation record (`x509_san_dns:<host>` when an
+X.509 verifier identity is registered, otherwise the did:jwk), the record's
+`nonce`, and the same `response_uri` (`OID4VP_ENDPOINT` when set, otherwise the
+OID4VCI endpoint).
+
+**Issuer-only presentations** are accepted only for DCQL requests whose
+`mso_mdoc` credential query sets `"require_cryptographic_holder_binding": false`
+(OpenID4VP 1.0 Section 6.1; the default is `true`). The waiver covers only the
+doctypes that query accepts. Presentation Exchange (`pres_def`) requests have
+no opt-out and always require device authentication.
+
 ## Testing
 
 Comprehensive test coverage including:

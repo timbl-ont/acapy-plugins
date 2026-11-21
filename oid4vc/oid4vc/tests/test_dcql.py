@@ -34,6 +34,19 @@ async def test_dcql_query_deser_roundtrip():
     assert raw_query == ser_query
 
 
+@pytest.mark.parametrize("binding", [None, True, False])
+def test_credential_query_require_cryptographic_holder_binding(binding):
+    raw = {"id": "mdl", "format": "mso_mdoc"}
+    if binding is not None:
+        raw["require_cryptographic_holder_binding"] = binding
+
+    query = CredentialQuery.deserialize(raw)
+
+    # Absent stays None; consumers apply the default of true (OpenID4VP 1.0 6.1).
+    assert query.require_cryptographic_holder_binding is binding
+    assert query.serialize() == raw
+
+
 @pytest.mark.asyncio
 async def test_dcql_query_saving(profile: Profile):
     des_query = DCQLQuery.deserialize(raw_query)

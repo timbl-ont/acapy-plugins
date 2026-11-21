@@ -2,12 +2,31 @@
 
 import pytest
 
-from oid4vc.utils import get_auth_header, get_tenant_subpath
+from oid4vc.utils import get_auth_header, get_tenant_subpath, oid4vp_response_uri
 
 
 def test_get_tenant_subpath(profile):
     profile.context.settings.set_value("multitenant.enabled", True)
     assert get_tenant_subpath(profile) == "/tenants/538451fa-11ab-41de-b6e3-7ae3df7356d6"
+
+
+def test_oid4vp_response_uri(monkeypatch, profile):
+    monkeypatch.delenv("OID4VCI_ENDPOINT", raising=False)
+    monkeypatch.delenv("OID4VP_ENDPOINT", raising=False)
+    assert (
+        oid4vp_response_uri(profile, "pres-1")
+        == "http://localhost:8020/oid4vp/response/pres-1"
+    )
+
+
+def test_oid4vp_response_uri_prefers_oid4vp_endpoint_and_tenant(monkeypatch, profile):
+    monkeypatch.delenv("OID4VCI_ENDPOINT", raising=False)
+    monkeypatch.setenv("OID4VP_ENDPOINT", "https://vp.example.com")
+    profile.context.settings.set_value("multitenant.enabled", True)
+    assert oid4vp_response_uri(profile, "pres-1") == (
+        "https://vp.example.com/tenant/538451fa-11ab-41de-b6e3-7ae3df7356d6"
+        "/oid4vp/response/pres-1"
+    )
 
 
 @pytest.mark.asyncio

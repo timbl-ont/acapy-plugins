@@ -8,10 +8,11 @@ import isomdl_uniffi
 from acapy_agent.core.profile import Profile
 from cryptography import x509 as _x509
 
-from oid4vc.config import Config
 from oid4vc.cred_processor import PresVerifier, VerifyResult
 from oid4vc.did_utils import retrieve_or_create_did_jwk
+from oid4vc.models.dcql_query import CredentialQuery, DCQLQuery
 from oid4vc.models.presentation import OID4VPPresentation
+from oid4vc.utils import oid4vp_response_uri
 
 from .utils import check_status_list_claim, flatten_trust_anchors
 from .cred_verifier import PreverifiedMdocClaims
@@ -28,7 +29,12 @@ async def _get_oid4vp_verification_params(
     profile: Profile,
     presentation_record: "OID4VPPresentation",
 ) -> tuple[str, str, str]:
-    """Get OID4VP verification parameters.
+    """Get the OID4VP request parameters the wallet bound its device signature to.
+
+    The mdoc SessionTranscript (OpenID4VP 1.0 Appendix B.2.6.1) hashes the
+    request's ``client_id`` (including its Client Identifier Prefix), ``nonce``
+    and ``response_uri``. They must equal the values in the request the wallet
+    received, or honest device authentication fails.
 
     Args:
         profile: The profile
@@ -38,25 +44,67 @@ async def _get_oid4vp_verification_params(
         Tuple of (nonce, client_id, response_uri)
     """
     nonce = presentation_record.nonce
-    config = Config.from_settings(profile.settings)
 
-    async with profile.session() as session:
-        jwk = await retrieve_or_create_did_jwk(session)
+    # The request stored its client_id on the record: x509_san_dns:<host> when an
+    # X.509 verifier identity is registered, otherwise the did:jwk.
+    client_id = presentation_record.client_id
+    if not client_id:
+        async with profile.session() as session:
+            client_id = (await retrieve_or_create_did_jwk(session)).did
 
-    client_id = jwk.did
-
-    wallet_id = (
-        profile.settings.get("wallet.id")
-        if profile.settings.get("multitenant.enabled")
-        else None
-    )
-    subpath = f"/tenant/{wallet_id}" if wallet_id else ""
-    response_uri = (
-        f"{config.endpoint}{subpath}/oid4vp/response/"
-        f"{presentation_record.presentation_id}"
-    )
+    response_uri = oid4vp_response_uri(profile, presentation_record.presentation_id)
 
     return nonce, client_id, response_uri
+
+
+def _query_accepts_doctype(cred: CredentialQuery, doc_type: Optional[str]) -> bool:
+    """Whether a DCQL credential query accepts an mdoc of this doctype.
+
+    Mirrors the DCQL evaluator's doctype check: ``meta.doctype_value``, else
+    ``meta.doctype_values``; a query with neither accepts any doctype.
+    """
+    if cred.meta and cred.meta.doctype_value:
+        return doc_type == cred.meta.doctype_value
+    if cred.meta and cred.meta.doctype_values:
+        return doc_type in cred.meta.doctype_values
+    return True
+
+
+async def _holder_binding_required(
+    profile: Profile,
+    presentation_record: OID4VPPresentation,
+    doc_type: Optional[str],
+) -> bool:
+    """Whether an mdoc presentation must prove holder binding (device auth).
+
+    For mdoc, the device signature over the SessionTranscript is the only proof
+    that the holder's device key presented the credential for this request
+    (nonce and verifier). Without it a captured DeviceResponse can be replayed.
+
+    DCQL: OpenID4VP 1.0 Section 6.1 ``require_cryptographic_holder_binding``,
+    default true. Binding is waived only when every ``mso_mdoc`` credential
+    query that accepts this doctype sets it to false. The DCQL evaluator then
+    checks the doctype against the query being answered, so a presentation
+    cannot borrow the waiver of a query for another doctype.
+
+    Presentation Exchange has no equivalent opt-out, so binding is required.
+    """
+    if not presentation_record.dcql_query_id:
+        return True
+
+    async with profile.session() as session:
+        query = await DCQLQuery.retrieve_by_id(session, presentation_record.dcql_query_id)
+
+    candidates = [
+        cred
+        for cred in query.credentials or []
+        if cred.format == "mso_mdoc" and _query_accepts_doctype(cred, doc_type)
+    ]
+    if not candidates:
+        return True
+    return any(
+        cred.require_cryptographic_holder_binding is not False for cred in candidates
+    )
 
 
 def _verify_single_presentation(
@@ -259,11 +307,13 @@ class MsoMdocPresVerifier(PresVerifier):
                     trust_anchor_registry,
                 )
 
-                # Per ISO 18013-5, deviceSigned is optional (marked with '?' in
-                # the CDDL).  For OID4VP web-wallet flows a device key binding
-                # round-trip is not performed, so device_authentication will not
-                # be VALID.  Issuer authentication is sufficient to trust that
-                # the credential was issued by a known authority.
+                # Issuer authentication proves the data is genuine. Only device
+                # authentication (the device key's signature over the
+                # SessionTranscript) binds the presentation to the holder and to
+                # this request's nonce and verifier. deviceSigned is mandatory in
+                # the ISO/IEC 18013-5 Document CDDL and in isomdl's Document, which
+                # isomdl-uniffi fills with a placeholder that fails verification
+                # when a wallet omits it.
                 issuer_ok = (
                     verified_data.issuer_authentication
                     == isomdl_uniffi.AuthenticationStatus.VALID
@@ -273,14 +323,36 @@ class MsoMdocPresVerifier(PresVerifier):
                     == isomdl_uniffi.AuthenticationStatus.VALID
                 )
 
-                if issuer_ok:
-                    if not device_ok:
-                        LOGGER.info(
-                            "Device authentication not present/valid (issuer-only "
-                            "OID4VP presentation — deviceSigned is optional per "
-                            "ISO 18013-5): Device=%s",
+                if issuer_ok and not device_ok:
+                    if await _holder_binding_required(
+                        profile, presentation_record, verified_data.doc_type
+                    ):
+                        LOGGER.warning(
+                            "mDoc presentation rejected: device authentication "
+                            "failed (Device=%s, Errors=%s). The query requires "
+                            "holder binding.",
                             verified_data.device_authentication,
+                            verified_data.errors,
                         )
+                        return VerifyResult(
+                            verified=False,
+                            payload={
+                                "error": "Device authentication failed: the "
+                                "presentation is not bound to the holder's device "
+                                "key for this request (holder binding required)",
+                                "docType": verified_data.doc_type,
+                                "issuer_auth": str(verified_data.issuer_authentication),
+                                "device_auth": str(verified_data.device_authentication),
+                            },
+                        )
+                    LOGGER.info(
+                        "Accepting issuer-only mDoc presentation: the DCQL query "
+                        "sets require_cryptographic_holder_binding to false "
+                        "(Device=%s)",
+                        verified_data.device_authentication,
+                    )
+
+                if issuer_ok:
                     try:
                         claims = extract_verified_claims(verified_data.verified_response)
                     except Exception as e:
