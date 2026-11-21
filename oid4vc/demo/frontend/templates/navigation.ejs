@@ -11,6 +11,12 @@
 		class="w3-bar-item w3-button w3-hover-white <%= locals.page=='present' ? 'w3-pale-green' : '' %>"
 		>Present Credential</button>
 <button
+		hx-get="/present-dcapi"
+		hx-target="#content"
+		hx-swap="innerhtml"
+		class="w3-bar-item w3-button w3-hover-white <%= locals.page=='present-dcapi' ? 'w3-pale-green' : '' %>"
+		>Present via DC-API</button>
+<button
 		hx-get="/update-status"
 		hx-target="#content"
 		hx-swap="innerhtml"

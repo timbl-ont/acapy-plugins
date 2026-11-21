@@ -22,6 +22,7 @@ docker compose up
 
 * Issue credentials via OpendID4VCI 1.0 - JWT, SD-JWT and mDOC
 * Present Proof via OpendID4VP - JWT, SD-JWT (Not working, in development)
+* Present an SD-JWT VC via the W3C Digital Credentials API ("Present via DC-API")
 * Update the status of a JWT or SD-JWT credential
 * Refresh an SD-JWT credential
 * Display credential records
@@ -33,6 +34,18 @@ This demo works with the Bifold wallet and the Paradym wallet (exception of JWT 
 Verification in the oid4vc plugin is still supporting an earlier draft of OID4VP and won't likely work with any modern wallet.
 
 Overall the demo needs to be refactored due to the additional functionality added to index.js
+
+### Presenting via the Digital Credentials API
+
+"Present via DC-API" requests the demo SD-JWT VC (`ExampleIDCard`) with
+`navigator.credentials.get()` instead of a QR code, using OpenID4VP 1.0
+Appendix A with a DCQL query and an encrypted response (`dc_api.jwt`). Open the
+demo at `http://localhost:3002` (a secure context) in a browser that supports
+the Digital Credentials API, with a wallet that supports OpenID4VP over it (for
+example Chrome with an Android wallet via the cross-device flow). The page sends
+its own origin as `expected_origins`; a production verifier should configure its
+origins server-side. mDL is not offered: over the DC-API ACA-Py cannot verify
+mdoc holder binding yet. See [`../docs/dc-api.md`](../docs/dc-api.md).
 
 ### Credential Refresh
 

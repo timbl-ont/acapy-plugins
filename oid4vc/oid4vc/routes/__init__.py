@@ -71,6 +71,7 @@ from .vp_presentation import (
     oid4vp_pres_remove,
 )
 from .vp_request import (
+    create_oid4vp_dc_api_request,
     create_oid4vp_request,
     delete_x509_identity,
     get_x509_identity,
@@ -101,6 +102,7 @@ __all__ = [
     "supported_credential_remove",
     # VP request
     "create_oid4vp_request",
+    "create_oid4vp_dc_api_request",
     "list_oid4vp_requests",
     # X.509 identity
     "register_x509_identity",
@@ -174,6 +176,7 @@ async def register(app: web.Application):
                 allow_head=False,
             ),
             web.post("/oid4vp/request", create_oid4vp_request),
+            web.post("/oid4vp/dc-api/request", create_oid4vp_dc_api_request),
             web.get("/oid4vp/requests", list_oid4vp_requests),
             web.get("/oid4vp/request/{request_id}", get_oid4vp_request_by_id),
             web.post("/oid4vp/x509-identity", register_x509_identity),

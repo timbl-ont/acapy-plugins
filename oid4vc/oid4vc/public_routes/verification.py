@@ -24,6 +24,13 @@ from aiohttp_apispec import (
 )
 from marshmallow import fields
 
+from oid4vc.dc_api import (
+    ResponseDecryptionError,
+    decrypt_response,
+    delete_response_key,
+    is_dc_api_presentation,
+    load_response_key,
+)
 from oid4vc.dcql import DCQLQueryEvaluator
 from oid4vc.jwt import jwt_sign
 from oid4vc.models.dcql_query import DCQLQuery
@@ -234,9 +241,18 @@ class PostOID4VPResponseSchema(OpenAPISchema):
     presentation_submission = fields.Str(required=False, metadata={"description": ""})
 
     vp_token = fields.Str(
-        required=True,
+        required=False,
         metadata={
-            "description": "",
+            "description": "VP Token (unencrypted responses). Required unless "
+            "'response' is provided.",
+        },
+    )
+
+    response = fields.Str(
+        required=False,
+        metadata={
+            "description": "Encrypted Authorization Response (compact JWE), used "
+            "for DC-API presentations with Response Mode dc_api.jwt.",
         },
     )
 
@@ -335,6 +351,44 @@ async def verify_pres_def_presentation(
     return result
 
 
+async def _decrypt_dc_api_response(
+    context: AdminRequestContext, record: OID4VPPresentation, form
+) -> Any:
+    """Decrypt the forwarded dc_api.jwt response of a DC-API presentation.
+
+    Returns the ``vp_token`` from the decrypted Authorization Response. Only an
+    encrypted response is accepted, and only once per presentation; the
+    single-use response key is deleted after successful decryption. Failures
+    raise HTTP 400 without changing the presentation state, so a malformed post
+    cannot invalidate a pending presentation.
+    """
+    if record.state != OID4VPPresentation.REQUEST_RETRIEVED:
+        raise web.HTTPBadRequest(
+            reason="A response was already received for this presentation"
+        )
+    raw_response = form.get("response")
+    if not isinstance(raw_response, str) or not raw_response:
+        raise web.HTTPBadRequest(
+            reason="DC-API presentations require an encrypted (dc_api.jwt) response"
+        )
+
+    async with context.session() as session:
+        loaded = await load_response_key(session, record.presentation_id)
+    if loaded is None:
+        raise web.HTTPBadRequest(
+            reason="No response encryption key found for this presentation"
+        )
+    key, kid = loaded
+    try:
+        payload = decrypt_response(raw_response, key, kid)
+    except ResponseDecryptionError as err:
+        raise web.HTTPBadRequest(reason=str(err)) from err
+
+    async with context.session() as session:
+        await delete_response_key(session, record.presentation_id)
+    return payload.get("vp_token")
+
+
 @docs(tags=["oid4vp"], summary="Provide OID4VP presentation")
 @match_info_schema(OID4VPPresentationIDMatchSchema())
 @form_schema(PostOID4VPResponseSchema())
@@ -378,11 +432,16 @@ async def post_response(request: web.Request):
     async with context.session() as session:
         record = await OID4VPPresentation.retrieve_by_id(session, presentation_id)
 
-    try:
-        if not isinstance(vp_token, str):
-            raise web.HTTPBadRequest(reason="vp_token must be a string")
+    if is_dc_api_presentation(record):
+        # OpenID4VP over the DC-API: the verifier front-end forwards the wallet's
+        # encrypted Authorization Response (Response Mode dc_api.jwt).
+        vp_token = await _decrypt_dc_api_response(context, record, form)
+        presentation_submission = None
 
+    try:
         if record.pres_def_id:
+            if not isinstance(vp_token, str):
+                raise web.HTTPBadRequest(reason="vp_token must be a string")
             if presentation_submission is None:
                 raise web.HTTPBadRequest(
                     reason="presentation_submission is required for PEX presentations"
@@ -395,9 +454,16 @@ async def post_response(request: web.Request):
                 presentation=record,
             )
         elif record.dcql_query_id:
+            # DCQL vp_token is a JSON object keyed by credential query id. A form
+            # field carries it as a JSON string; a decrypted dc_api.jwt response
+            # carries it already parsed.
+            if isinstance(vp_token, str):
+                vp_token = json.loads(vp_token)
+            if not isinstance(vp_token, dict):
+                raise web.HTTPBadRequest(reason="vp_token must be a JSON object")
             verify_result = await verify_dcql_presentation(
                 profile=context.profile,
-                vp_token=json.loads(vp_token),
+                vp_token=vp_token,
                 dcql_query_id=record.dcql_query_id,
                 presentation=record,
             )

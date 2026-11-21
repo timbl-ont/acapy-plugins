@@ -66,6 +66,54 @@
             document.getElementById("mySidebar").style.display = "none";
             document.getElementById("myOverlay").style.display = "none";
           }
+
+          // DC-API presentation flow (see oid4vc/docs/dc-api.md): ask the demo
+          // backend for an OpenID4VP request, hand it to the wallet through the
+          // Digital Credentials API, then forward the encrypted response.
+          async function requestViaDcApi(presentationId) {
+            const statusEl = document.getElementById("presentation");
+            const setStatus = (text) => {
+              if (statusEl) statusEl.textContent = text;
+            };
+            try {
+              if (!("DigitalCredential" in window) || !navigator.credentials) {
+                throw new Error("This browser does not support the Digital Credentials API.");
+              }
+              setStatus("Creating DC-API request...");
+              const initResp = await fetch(
+                `/present-dcapi/init/${presentationId}?origin=${encodeURIComponent(window.location.origin)}`
+              );
+              const init = await initResp.json();
+              if (!initResp.ok) {
+                throw new Error(init.error || `Creating the request failed (${initResp.status})`);
+              }
+
+              setStatus("Waiting for the wallet...");
+              const credential = await navigator.credentials.get({
+                digital: { requests: [{ protocol: init.protocol, data: init.request }] },
+              });
+              const data = typeof credential.data === "string"
+                ? JSON.parse(credential.data)
+                : credential.data;
+              if (data.error) {
+                throw new Error(`Wallet returned an error: ${data.error}`);
+              }
+
+              setStatus("Submitting the encrypted response...");
+              const resp = await fetch(`/present-dcapi/response/${init.presentation_id}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ response: data.response }),
+              });
+              if (!resp.ok) {
+                throw new Error(`Submitting the response failed (${resp.status})`);
+              }
+              setStatus("Response submitted, verifying...");
+            } catch (err) {
+              console.error(err);
+              setStatus(err.message);
+            }
+          }
         </script>
       </footer>
     </main>

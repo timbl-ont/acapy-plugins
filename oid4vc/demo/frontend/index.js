@@ -70,6 +70,8 @@ app.use(express.static("public"));
 const events = new EventEmitter();
 const exchangeCache = new NodeCache({ stdTTL: 300, checkperiod: 400 });
 const presentationCache = new NodeCache({ stdTTL: 300, checkperiod: 400 });
+// DC-API presentations: ACA-Py presentation id -> response URI to forward to
+const dcApiCache = new NodeCache({ stdTTL: 300, checkperiod: 400 });
 
 const API_BASE_URL = process.env.API_BASE_URL || "http://localhost:3001";
 const API_KEY = process.env.API_KEY;
@@ -1259,6 +1261,103 @@ async function create_mdoc_presentation(req, res) {
   res.send(qrcode);
 }
 
+// DC-API Presentation Flow
+// Requests an SD-JWT VC through the W3C Digital Credentials API
+// (navigator.credentials.get) instead of a QR code. ACA-Py returns an
+// OpenID4VP 1.0 Appendix A request (DCQL, response mode dc_api.jwt). The browser
+// hands it to the wallet and gets back an encrypted response, which the page
+// posts here to be forwarded to ACA-Py. See oid4vc/docs/dc-api.md.
+async function init_sdjwt_dcapi_presentation(req, res) {
+  const presentationId = req.params.id;
+  // The page reports its own origin. A production verifier should configure the
+  // origins it serves from instead of trusting the client.
+  const origin = req.query.origin;
+  const commonHeaders = {
+    accept: "application/json",
+    "Content-Type": "application/json",
+    "Authorization": "Bearer " + token.token,
+  };
+  if (API_KEY) {
+    commonHeaders["X-API-KEY"] = API_KEY;
+  }
+
+  const fetchApiData = async (url, options) => {
+    const response = await fetch(url, options);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(`${url} returned ${response.status}: ${JSON.stringify(body)}`);
+    }
+    return body;
+  };
+
+  events.emit(`presentation-${presentationId}`, {type: "message", message: "Creating DCQL Query for an SD-JWT VC."});
+  const dcqlQueryData = await fetchApiData(`${API_BASE_URL}/oid4vp/dcql/queries`, {
+    method: "POST",
+    headers: commonHeaders,
+    body: JSON.stringify({
+      credentials: [
+        {
+          id: "id_card",
+          format: "vc+sd-jwt",
+          meta: { vct_values: ["ExampleIDCard"] },
+          claims: [
+            { path: ["given_name"] },
+            { path: ["family_name"] },
+          ],
+        },
+      ],
+    }),
+  });
+  const dcqlQueryId = dcqlQueryData.dcql_query_id;
+  events.emit(`presentation-${presentationId}`, {type: "message", message: `Created DCQL Query ID: ${dcqlQueryId}`});
+  events.emit(`presentation-${presentationId}`, {type: "debug-message", message: "Response data", data: dcqlQueryData});
+
+  events.emit(`presentation-${presentationId}`, {type: "message", message: "Creating DC-API request."});
+  const dcApiData = await fetchApiData(`${API_BASE_URL}/oid4vp/dc-api/request`, {
+    method: "POST",
+    headers: commonHeaders,
+    body: JSON.stringify({
+      dcql_query_id: dcqlQueryId,
+      vp_formats: {
+        "vc+sd-jwt": {
+          "sd-jwt_alg_values": ["ES256", "EdDSA"],
+          "kb-jwt_alg_values": ["ES256", "EdDSA"],
+        },
+      },
+      expected_origins: [origin],
+    }),
+  });
+  events.emit(`presentation-${presentationId}`, {type: "message", message: `DC-API request created (${dcApiData.protocol}). Waiting for the wallet...`});
+  events.emit(`presentation-${presentationId}`, {type: "debug-message", message: "Response data", data: dcApiData});
+
+  // oid4vp webhooks carry the dcql_query_id; the response URI is where the
+  // encrypted response is forwarded.
+  presentationCache.set(dcqlQueryId, { dcqlQueryData, presentationId });
+  dcApiCache.set(dcApiData.presentation_id, dcApiData.response_uri);
+
+  res.json({
+    presentation_id: dcApiData.presentation_id,
+    protocol: dcApiData.protocol,
+    request: dcApiData.request,
+  });
+}
+
+// Forward the wallet's encrypted Authorization Response (dc_api.jwt) to ACA-Py's
+// public OID4VP endpoint as the "response" form field.
+async function forward_dcapi_response(req, res) {
+  const responseUri = dcApiCache.get(req.params.presentationId);
+  if (!responseUri || typeof req.body?.response !== "string") {
+    res.status(400).json({});
+    return;
+  }
+  const result = await fetch(responseUri, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ response: req.body.response }).toString(),
+  });
+  res.status(result.status).json({});
+}
+
 // ##     ## ######## ##     ## ##     ##
 // ##     ##    ##    ###   ###  ##   ##
 // ##     ##    ##    #### ####   ## ##
@@ -1925,6 +2024,24 @@ app.post("/issue", (req, res, next) => {
   // Event Stream for Presentation page
   app.get("/stream/present/:id", (req, res) => {
     handleEvents("presentation", req, res);
+  });
+
+  // Render the DC-API presentation page (shares the presentation event stream)
+  app.get("/present-dcapi", (req, res) => {
+    res.render("present-dcapi", {"page": "present-dcapi", "presentationId": uuidv4()});
+  });
+
+  // Create a DC-API request; returns the parameters for navigator.credentials.get()
+  app.get("/present-dcapi/init/:id", (req, res) => {
+    init_sdjwt_dcapi_presentation(req, res).catch((err) => {
+      logger.error(err);
+      res.status(500).json({error: err.message});
+    });
+  });
+
+  // Forward the wallet's encrypted response to ACA-Py
+  app.post("/present-dcapi/response/:presentationId", (req, res, next) => {
+    forward_dcapi_response(req, res).catch(next);
   });
 
   // ##      ## ######## ########  ##     ##  #######   #######  ##    ##  ######
