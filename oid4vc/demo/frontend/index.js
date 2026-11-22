@@ -1343,7 +1343,11 @@ function handleEvents(event_type, req, res) {
         ecl: "M",
       });
       logger.debug(data.qrcode);
-      res.write(`event: qrcode\ndata: ${qrcode.svg().replace(/\r?\n|\r/g, " ")}\n\n`);
+      // Offer the same exchange through the W3C Digital Credentials API too.
+      const dcApiButton = data.exchangeId
+        ? ` <div><button class="w3-btn w3-green" style="margin-top: 1em;" onclick="issueViaDcApi('${data.exchangeId}')">Add to wallet via the browser</button><div id="dcapi-issue-status"></div></div>`
+        : "";
+      res.write(`event: qrcode\ndata: ${qrcode.svg().replace(/\r?\n|\r/g, " ")}${dcApiButton}\n\n`);
     }
   });
 
@@ -1885,6 +1889,35 @@ app.post("/issue", (req, res, next) => {
         res.status(400).send("");
     }
   });
+
+// Offer an exchange created by this demo through the W3C Digital Credentials
+// API (experimental): ACA-Py returns the Credential Offer for
+// navigator.credentials.create(), with its metadata embedded. See
+// oid4vc/docs/dc-api-issuance.md.
+async function get_dcapi_credential_offer(req, res) {
+  const exchangeId = req.params.exchangeId;
+  if (!exchangeCache.get(exchangeId)) {
+    res.status(404).json({error: "Unknown exchange"});
+    return;
+  }
+  const headers = { accept: "application/json", "Authorization": "Bearer " + token.token };
+  if (API_KEY) {
+    headers["X-API-KEY"] = API_KEY;
+  }
+  const response = await fetch(
+    `${API_BASE_URL}/oid4vci/dc-api/credential-offer?exchange_id=${encodeURIComponent(exchangeId)}`,
+    { headers },
+  );
+  const body = await response.json().catch(() => ({}));
+  res.status(response.status).json(body);
+}
+
+app.get("/issue-dcapi/offer/:exchangeId", (req, res) => {
+  get_dcapi_credential_offer(req, res).catch((err) => {
+    logger.error(err);
+    res.status(500).json({error: err.message});
+  });
+});
 
   // Event Stream for Issuance page
   app.get("/stream/issue/:id", (req, res) => {

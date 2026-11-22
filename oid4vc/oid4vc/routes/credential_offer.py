@@ -134,3 +134,67 @@ async def get_cred_offer_by_ref(request: web.BaseRequest):
         "credential_offer_uri": f"openid-credential-offer://?credential_offer={quote(ref_uri)}",
     }
     return web.json_response(offer_response)
+
+
+DC_API_ISSUANCE_PROTOCOL = "openid4vci-v1"
+
+
+class DcApiCredOfferResponseSchema(OpenAPISchema):
+    """Credential offer for the W3C Digital Credentials API."""
+
+    protocol = fields.Str(
+        required=True,
+        metadata={
+            "description": "Issuance protocol identifier, for requests[].protocol.",
+            "example": DC_API_ISSUANCE_PROTOCOL,
+        },
+    )
+    data = fields.Dict(
+        required=True,
+        metadata={
+            "description": (
+                "Credential Offer to pass as requests[].data to "
+                "navigator.credentials.create(), with the Credential Issuer "
+                "Metadata (and, when ACA-Py is its own authorization server, the "
+                "Authorization Server Metadata) embedded by value."
+            )
+        },
+    )
+
+
+@docs(
+    tags=["oid4vci"],
+    summary="Get a credential offer for the W3C Digital Credentials API (experimental)",
+)
+@querystring_schema(CredOfferQuerySchema())
+@response_schema(DcApiCredOfferResponseSchema(), 200)
+@tenant_authentication
+async def get_dc_api_cred_offer(request: web.BaseRequest):
+    """Credential offer for navigator.credentials.create() (DC-API issuance).
+
+    Experimental: OpenID4VCI does not yet define its use with the W3C Digital
+    Credentials API (OpenID4VCI issue #410). This follows the shape browsers
+    accept for protocol ``openid4vci-v1``: the Credential Offer by value with
+    ``credential_issuer_metadata`` and, when ACA-Py is its own authorization
+    server, ``authorization_server_metadata`` embedded, so the wallet does not
+    need to fetch them. The wallet then completes issuance through the usual
+    token and credential endpoints. See ``docs/dc-api-issuance.md``.
+    """
+    # Imported here: public_routes imports this package while it loads.
+    from ..public_routes.metadata import dc_api_offer_metadata  # noqa: PLC0415
+
+    context: AdminRequestContext = request["context"]
+    exchange_id = request.query["exchange_id"]
+
+    offer = await _parse_cred_offer(context, exchange_id)
+    wallet_id = (
+        context.profile.settings.get("wallet.id")
+        if context.profile.settings.get("multitenant.enabled")
+        else None
+    )
+    async with context.session() as session:
+        metadata = await dc_api_offer_metadata(context, session, wallet_id)
+
+    return web.json_response(
+        {"protocol": DC_API_ISSUANCE_PROTOCOL, "data": {**offer, **metadata}}
+    )

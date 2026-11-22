@@ -25,6 +25,7 @@ from .credential_offer import (
     CredOfferResponseSchemaVal,
     get_cred_offer,
     get_cred_offer_by_ref,
+    get_dc_api_cred_offer,
 )
 from .did_jwk import create_did_jwk
 from .exchange import (
@@ -86,6 +87,7 @@ __all__ = [
     "CredOfferResponseSchemaRef",
     "get_cred_offer",
     "get_cred_offer_by_ref",
+    "get_dc_api_cred_offer",
     # Exchange
     "list_exchange_records",
     "exchange_create",
@@ -148,6 +150,11 @@ async def register(app: web.Application):
             web.get(
                 "/oid4vci/credential-offer-by-ref",
                 get_cred_offer_by_ref,
+                allow_head=False,
+            ),
+            web.get(
+                "/oid4vci/dc-api/credential-offer",
+                get_dc_api_cred_offer,
                 allow_head=False,
             ),
             web.patch("/oid4vci/credential-refresh/{refresh_id}", credential_refresh),

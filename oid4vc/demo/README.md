@@ -21,6 +21,7 @@ docker compose up
 ### Demo Functionality
 
 * Issue credentials via OpendID4VCI 1.0 - JWT, SD-JWT and mDOC
+* Add an issued credential to a wallet via the W3C Digital Credentials API (experimental)
 * Present Proof via OpendID4VP - JWT, SD-JWT (Not working, in development)
 * Update the status of a JWT or SD-JWT credential
 * Refresh an SD-JWT credential
@@ -54,3 +55,13 @@ token.
 To retrieve the credential a refresh token is required. In the future, dPOP will also be required.
 
 You will need a mechanism to trigger the refresh in your wallet. One mechanism is to monitor the status of the credential via the credential status list. Bifold supports this option if configured to do so.
+
+### Issuing via the Digital Credentials API
+
+Next to each issuance QR code the demo shows "Add to wallet via the browser",
+which offers the same exchange through `navigator.credentials.create()`
+(protocol `openid4vci-v1`) instead of a QR code. This is experimental: it needs a
+browser and wallet that support issuance over the Digital Credentials API (for
+example Chrome 155 or later with an Android wallet), and the offer format may
+change as OpenID4VCI defines it. See
+[`../docs/dc-api-issuance.md`](../docs/dc-api-issuance.md).

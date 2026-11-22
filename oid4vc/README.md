@@ -11,6 +11,7 @@ This plugin implements [OpenID4VCI 1.0][oid4vci]. This implementation follows th
 | [Admin API Reference](docs/admin-api-reference.md) | All `/oid4vci/*`, `/oid4vp/*`, `/mso_mdoc/*`, `/did/*` endpoints |
 | [Public API Reference](docs/public-api-reference.md) | OID4VCI/OID4VP wallet-facing endpoints |
 | [Issuance Cookbook](docs/cookbook-issuance.md) | Step-by-step curl examples for `jwt_vc_json`, `sd_jwt_vc`, `mso_mdoc` |
+| [DC-API Issuance](docs/dc-api-issuance.md) | Experimental: credential offers for `navigator.credentials.create()` via the W3C Digital Credentials API |
 | [Verification Cookbook](docs/cookbook-verification.md) | PEX and DCQL-based VP flows with curl examples |
 | [Credential Formats](docs/credential-formats.md) | Format-specific schema details, selective disclosure, mDOC namespaces |
 | [Key Attestation](docs/key-attestation.md) | Trusted Wallet Providers, attestation proofs, multi-key issuance and limits |

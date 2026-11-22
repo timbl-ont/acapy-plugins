@@ -56,6 +56,41 @@
         <div class="w3-light-grey w3-container w3-padding-32" style="margin-top:75px;padding-right:58px"><p class="w3-right">Powered by <a href="https://www.w3schools.com/w3css/default.asp" title="W3.CSS" target="_blank" class="w3-hover-opacity">w3.css</a></p></div>
 
         <script>
+          // DC-API issuance (experimental, see oid4vc/docs/dc-api-issuance.md):
+          // hand the exchange's Credential Offer to the wallet through the
+          // Digital Credentials API. The wallet then collects the credential
+          // from ACA-Py; the page shows "Credential Issued!" when it does.
+          async function issueViaDcApi(exchangeId) {
+            const statusEl = document.getElementById("dcapi-issue-status");
+            const setStatus = (text) => {
+              if (statusEl) statusEl.textContent = text;
+            };
+            try {
+              if (!("DigitalCredential" in window) || !navigator.credentials) {
+                throw new Error("This browser does not support the Digital Credentials API.");
+              }
+              setStatus("Preparing the offer...");
+              const resp = await fetch(`/issue-dcapi/offer/${exchangeId}`);
+              const offer = await resp.json();
+              if (!resp.ok) {
+                throw new Error(offer.error || `Creating the offer failed (${resp.status})`);
+              }
+              setStatus("Waiting for the wallet...");
+              const credential = await navigator.credentials.create({
+                digital: { requests: [{ protocol: offer.protocol, data: offer.data }] },
+              });
+              const data = typeof credential.data === "string"
+                ? JSON.parse(credential.data)
+                : credential.data;
+              setStatus(`Wallet response: ${JSON.stringify(data)}`);
+            } catch (err) {
+              console.error(err);
+              setStatus(err.name === "NotSupportedError"
+                ? "This browser cannot issue through the Digital Credentials API."
+                : err.message);
+            }
+          }
+
           // Script to open and close sidebar
           function w3_open() {
             document.getElementById("mySidebar").style.display = "block";

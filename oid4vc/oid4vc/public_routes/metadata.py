@@ -125,6 +125,120 @@ class CredentialIssuerMetadataSchema(OpenAPISchema):
     )
 
 
+async def build_credential_issuer_metadata(
+    context: AdminRequestContext, session, wallet_id: str | None
+) -> dict[str, Any]:
+    """Build the Credential Issuer Metadata document (OID4VCI 1.0 Section 12.2).
+
+    Served at ``/.well-known/openid-credential-issuer`` and carried by value in
+    credential offers sent over the W3C Digital Credentials API.
+    """
+    config = Config.from_settings(context.settings)
+    public_url = config.endpoint
+
+    # TODO If there's a lot, this will be a problem
+    credentials_supported = await SupportedCredential.query(session)
+
+    subpath = f"/tenant/{wallet_id}" if wallet_id else ""
+    issuer_config = await _load_issuer_config(session, wallet_id)
+    provider, auth_ctx = _auth_provider(context.profile, issuer_config)
+
+    metadata: dict[str, Any] = {"credential_issuer": f"{public_url}{subpath}"}
+    if provider.serves_token_endpoint:
+        # Extension for wallets (e.g. waltid) that read token_endpoint from
+        # credential issuer metadata instead of doing AS discovery.
+        metadata["token_endpoint"] = f"{public_url}{subpath}/token"
+    metadata["credential_endpoint"] = f"{public_url}{subpath}/credential"
+    metadata["notification_endpoint"] = f"{public_url}{subpath}/notification"
+    cred_configs = _build_cred_configs(
+        credentials_supported, context.inject(CredProcessors)
+    )
+    metadata["credential_configurations_supported"] = cred_configs
+
+    _apply_overlay(
+        metadata,
+        issuer_config,
+        cred_configs,
+        f"{public_url}{subpath}",
+        config.enable_nonce_endpoint,
+    )
+    _set_authorization_servers(metadata, provider, auth_ctx)
+    return metadata
+
+
+async def build_authorization_server_metadata(
+    context: AdminRequestContext, session, wallet_id: str | None
+) -> dict[str, Any]:
+    """Build the OpenID Connect Discovery / OAuth Authorization Server metadata.
+
+    Served at ``/.well-known/openid-configuration`` and
+    ``/.well-known/oauth-authorization-server``.
+    """
+    config = Config.from_settings(context.settings)
+    public_url = config.endpoint
+
+    # TODO If there's a lot, this will be a problem
+    credentials_supported = await SupportedCredential.query(session)
+
+    subpath = f"/tenant/{wallet_id}" if wallet_id else ""
+    base_url = f"{public_url}{subpath}"
+    issuer_config = await _load_issuer_config(session, wallet_id)
+    provider, auth_ctx = _auth_provider(context.profile, issuer_config)
+
+    cred_configs = _build_cred_configs(
+        credentials_supported, context.inject(CredProcessors)
+    )
+
+    metadata: dict[str, Any] = {
+        "issuer": base_url,
+        # Required by OIDF CheckServerConfiguration; unused in pre-auth flow.
+        "authorization_endpoint": f"{base_url}/authorize",
+        "response_types_supported": ["code"],
+        "dpop_signing_alg_values_supported": ["ES256", "ES384", "ES512"],
+        "grant_types_supported": ["urn:ietf:params:oauth:grant-type:pre-authorized_code"],
+        "authorization_details_types_supported": ["openid_credential"],
+        "credential_issuer": base_url,
+        "credential_endpoint": f"{base_url}/credential",
+        "notification_endpoint": f"{base_url}/notification",
+        "credential_configurations_supported": cred_configs,
+    }
+
+    # token_endpoint belongs to the AS; only advertise when ACA-Py is its own AS.
+    if provider.serves_token_endpoint:
+        metadata["token_endpoint"] = f"{base_url}/token"
+
+    _apply_overlay(
+        metadata, issuer_config, cred_configs, base_url, config.enable_nonce_endpoint
+    )
+    _set_authorization_servers(metadata, provider, auth_ctx)
+    return metadata
+
+
+async def dc_api_offer_metadata(
+    context: AdminRequestContext, session, wallet_id: str | None
+) -> dict[str, Any]:
+    """Metadata carried by value in a credential offer sent over the DC-API.
+
+    Over the W3C Digital Credentials API the wallet may be unable to fetch the
+    issuer's metadata, so the offer embeds the Credential Issuer Metadata and,
+    when ACA-Py is its own authorization server, the Authorization Server
+    Metadata: the same documents served under ``/.well-known/``. With an
+    external authorization server only ``authorization_servers`` is conveyed.
+    """
+    result: dict[str, Any] = {
+        "credential_issuer_metadata": await build_credential_issuer_metadata(
+            context, session, wallet_id
+        )
+    }
+    issuer_config = await _load_issuer_config(session, wallet_id)
+    provider, _ = _auth_provider(context.profile, issuer_config)
+    if provider.serves_token_endpoint:
+        result[
+            "authorization_server_metadata"
+        ] = await build_authorization_server_metadata(context, session, wallet_id)
+    return result
+
+
 @docs(tags=["oid4vc"], summary="Get credential issuer metadata")
 @response_schema(CredentialIssuerMetadataSchema())
 async def credential_issuer_metadata(request: web.Request):
@@ -135,38 +249,11 @@ async def credential_issuer_metadata(request: web.Request):
     the signed metadata format). Otherwise, plain JSON is returned.
     """
     context: AdminRequestContext = request["context"]
-    config = Config.from_settings(context.settings)
-    public_url = config.endpoint
 
     async with context.session() as session:
-        # TODO If there's a lot, this will be a problem
-        credentials_supported = await SupportedCredential.query(session)
-
-        wallet_id = request.match_info.get("wallet_id")
-        subpath = f"/tenant/{wallet_id}" if wallet_id else ""
-        issuer_config = await _load_issuer_config(session, wallet_id)
-        provider, auth_ctx = _auth_provider(context.profile, issuer_config)
-
-        metadata: dict[str, Any] = {"credential_issuer": f"{public_url}{subpath}"}
-        if provider.serves_token_endpoint:
-            # Extension for wallets (e.g. waltid) that read token_endpoint from
-            # credential issuer metadata instead of doing AS discovery.
-            metadata["token_endpoint"] = f"{public_url}{subpath}/token"
-        metadata["credential_endpoint"] = f"{public_url}{subpath}/credential"
-        metadata["notification_endpoint"] = f"{public_url}{subpath}/notification"
-        cred_configs = _build_cred_configs(
-            credentials_supported, context.inject(CredProcessors)
+        metadata = await build_credential_issuer_metadata(
+            context, session, request.match_info.get("wallet_id")
         )
-        metadata["credential_configurations_supported"] = cred_configs
-
-        _apply_overlay(
-            metadata,
-            issuer_config,
-            cred_configs,
-            f"{public_url}{subpath}",
-            config.enable_nonce_endpoint,
-        )
-        _set_authorization_servers(metadata, provider, auth_ctx)
 
         # OID4VCI 1.0 §12.2.2/§12.2.3: signed metadata as JWT with application/jwt.
         accept = request.headers.get("Accept", "")
@@ -228,47 +315,11 @@ async def openid_configuration(request: web.Request):
     credential issuer metadata for maximum interoperability.
     """
     context: AdminRequestContext = request["context"]
-    config = Config.from_settings(context.settings)
-    public_url = config.endpoint
 
     async with context.session() as session:
-        # TODO If there's a lot, this will be a problem
-        credentials_supported = await SupportedCredential.query(session)
-
-        wallet_id = request.match_info.get("wallet_id")
-        subpath = f"/tenant/{wallet_id}" if wallet_id else ""
-        base_url = f"{public_url}{subpath}"
-        issuer_config = await _load_issuer_config(session, wallet_id)
-        provider, auth_ctx = _auth_provider(context.profile, issuer_config)
-
-        cred_configs = _build_cred_configs(
-            credentials_supported, context.inject(CredProcessors)
+        metadata = await build_authorization_server_metadata(
+            context, session, request.match_info.get("wallet_id")
         )
-
-        metadata: dict[str, Any] = {
-            "issuer": base_url,
-            # Required by OIDF CheckServerConfiguration; unused in pre-auth flow.
-            "authorization_endpoint": f"{base_url}/authorize",
-            "response_types_supported": ["code"],
-            "dpop_signing_alg_values_supported": ["ES256", "ES384", "ES512"],
-            "grant_types_supported": [
-                "urn:ietf:params:oauth:grant-type:pre-authorized_code"
-            ],
-            "authorization_details_types_supported": ["openid_credential"],
-            "credential_issuer": base_url,
-            "credential_endpoint": f"{base_url}/credential",
-            "notification_endpoint": f"{base_url}/notification",
-            "credential_configurations_supported": cred_configs,
-        }
-
-        # token_endpoint belongs to the AS; only advertise when ACA-Py is its own AS.
-        if provider.serves_token_endpoint:
-            metadata["token_endpoint"] = f"{base_url}/token"
-
-        _apply_overlay(
-            metadata, issuer_config, cred_configs, base_url, config.enable_nonce_endpoint
-        )
-        _set_authorization_servers(metadata, provider, auth_ctx)
 
     LOGGER.debug("OPENID CONFIG: %s", metadata)
 
