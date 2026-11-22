@@ -63,8 +63,7 @@ def extract_signing_cert(pem_chain: str) -> str:
 
     For the issuer, the signing certificate (the one whose private key is
     used to sign the MSO) is expected to be the **first** cert in the chain.
-    This helper extracts exactly that cert so that only one PEM block is
-    forwarded to ``Mdoc.create_and_sign()``.
+    This helper extracts exactly that cert.
 
     Args:
         pem_chain: One or more concatenated PEM certificate blocks.
@@ -105,11 +104,16 @@ def flatten_trust_anchors(trust_anchors: List[str]) -> List[str]:
     return flat
 
 
-async def check_status_list_claim(claims: dict) -> Optional[str]:
-    """Check IETF Token Status List revocation status embedded in mDoc claims.
+async def check_status_list_claim(
+    claims: dict, mso_status: Optional[dict] = None
+) -> Optional[str]:
+    """Check IETF Token Status List revocation status of an mDoc.
 
-    Searches all namespaces in *claims* for a ``status.status_list`` entry
-    containing ``idx`` (credential index) and ``uri`` (status list endpoint).
+    Uses the MSO ``status`` (*mso_status*, from ``Mdoc.status_list()``) when it
+    has a ``status_list`` entry. Otherwise, for mDocs issued before the status
+    moved into the MSO, searches all namespaces in *claims* for a
+    ``status.status_list`` entry. The entry holds ``idx`` (credential index)
+    and ``uri`` (status list endpoint).
     If found, fetches the published status list JWT, decodes the little-endian
     compressed bitstring, and checks the bit(s) at *idx*.
 
@@ -122,14 +126,19 @@ async def check_status_list_claim(claims: dict) -> Optional[str]:
         claims: Namespace-keyed claims dict from ``extract_verified_claims`` or
                 ``_extract_mdoc_claims``, e.g.
                 ``{"org.iso.18013.5.1": {"family_name": "Smith", "status": {...}}}``
+        mso_status: The MSO ``status`` as returned (JSON-decoded) by
+                ``Mdoc.status_list()``, e.g. ``{"status_list": {"idx": 1, "uri": ...}}``
 
     Returns:
         ``None`` if the credential is valid (or has no status claim).
         An error string if the credential is revoked or suspended.
     """
-    # Search all namespaces for a status.status_list.{idx, uri} entry
     status_entry = None
-    for ns_claims in claims.values():
+    if isinstance(mso_status, dict) and isinstance(mso_status.get("status_list"), dict):
+        status_entry = mso_status["status_list"]
+
+    # Legacy: a status.status_list.{idx, uri} data element in a namespace
+    for ns_claims in claims.values() if status_entry is None else ():
         if not isinstance(ns_claims, dict):
             continue
         status = ns_claims.get("status")

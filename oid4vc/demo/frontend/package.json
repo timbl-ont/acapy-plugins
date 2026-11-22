@@ -4,6 +4,7 @@
 		"start": "node index.js"
 	},
 	"dependencies": {
+		"@peculiar/x509": "1.14.3",
 		"axios": "^1.20.0",
 		"ejs": "^6.0.1",
 		"express": "^5.2.1",

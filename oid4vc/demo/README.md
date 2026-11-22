@@ -20,9 +20,9 @@ docker compose up
 
 ### Demo Functionality
 
-* Issue credentials via OpendID4VCI 1.0 - JWT, SD-JWT and mDOC
+* Issue credentials via OpendID4VCI 1.0 - JWT, SD-JWT and mdoc (an ISO/IEC 18013-5 mDL or an ISO/IEC TS 23220-4 photo ID)
 * Present Proof via OpendID4VP - JWT, SD-JWT (Not working, in development)
-* Update the status of a JWT or SD-JWT credential
+* Update the status of a JWT, SD-JWT or mdoc credential
 * Refresh an SD-JWT credential
 * Display credential records
 
@@ -33,6 +33,26 @@ This demo works with the Bifold wallet and the Paradym wallet (exception of JWT 
 Verification in the oid4vc plugin is still supporting an earlier draft of OID4VP and won't likely work with any modern wallet.
 
 Overall the demo needs to be refactored due to the additional functionality added to index.js
+
+### mdoc Issuance
+
+The demo issues two mdoc doctypes: the mDL (`org.iso.18013.5.1.mDL`) and the photo ID
+(`org.iso.23220.photoid.1`, with the `org.iso.23220.1` and `org.iso.23220.photoid.1`
+namespaces). Pick either in the credential type list on the Issue page.
+
+The mdocs are signed with a P-256 key in the issuer's wallet; the plugin never holds
+the private key. At start-up the demo:
+
+1. creates the wallet key (`POST /wallet/keys`);
+2. requests a CSR for it from the `x509_certs` plugin (`POST /x509/csr`);
+3. issues the document signer (DS) certificate itself, with the TEST-ONLY IACA in
+   `frontend/index.js` and the ISO/IEC 18013-5 Annex B DS profile;
+4. stores the chain with purpose `mdoc_ds` (`POST /x509/certificates`), and
+   registers the IACA as a trust anchor.
+
+Both credential configurations name that key as their `document_signer`, and each gets an IETF Token Status List definition, so every mdoc carries a status list reference in its MSO. Revoke one on the Update Status page with its credential exchange ID. To verify
+the demo's mdocs elsewhere, use `iaca_certificate_pem` from `frontend/index.js` as
+the trust anchor. Regenerate the IACA with `python3 demo/generate_mdoc_certs.py`.
 
 ### Credential Refresh
 

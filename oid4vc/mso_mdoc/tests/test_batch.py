@@ -10,6 +10,7 @@ from aries_askar import Key, KeyAlg
 
 from mso_mdoc import cred_processor as test_module
 from mso_mdoc.signing_key import (
+    MdocSigningKeyRecord,
     generate_ec_p256_key_pem,
     generate_self_signed_certificate,
 )
@@ -19,13 +20,12 @@ from oid4vc.models.issuer_config import IssuerConfiguration
 from oid4vc.models.wallet_provider import WalletProvider
 from oid4vc.public_routes.credential import _issue_cred_inner
 from oid4vc.public_routes.nonce import create_nonce
+from oid4vc.status_handler import StatusHandler
 from oid4vc.tests.test_key_attestation import ISS, KID, make_attestation
 from oid4vc.utils import get_wallet_id
 
 
-async def test_real_mdoc_batch_binding_and_native_validity(
-    supported, ex_record, monkeypatch
-):
+async def test_real_mdoc_batch_binding_and_native_validity(supported, ex_record):
     profile = await create_test_profile(
         {
             "plugin_config": {
@@ -41,24 +41,34 @@ async def test_real_mdoc_batch_binding_and_native_validity(
     profile.context.injector.bind_instance(
         CredProcessors, CredProcessors({"mso_mdoc": processor})
     )
+    status = {"status_list": {"idx": 9, "uri": "https://example.com/status/1"}}
+    status_handler = StatusHandler.__new__(StatusHandler)
+    status_handler.handler = SimpleNamespace(
+        assign_status_entries=AsyncMock(return_value=status)
+    )
+    profile.context.injector.bind_instance(StatusHandler, status_handler)
     context = AdminRequestContext(profile)
     private_key = generate_ec_p256_key_pem()
-    certificate = generate_self_signed_certificate(private_key)
-    monkeypatch.setattr(
-        processor,
-        "_resolve_signing_key",
-        AsyncMock(
-            return_value={"private_key_pem": private_key, "certificate_pem": certificate}
-        ),
+    signing_key = MdocSigningKeyRecord(
+        private_key_pem=private_key,
+        certificate_pem=generate_self_signed_certificate(private_key),
     )
     supported.format = "mso_mdoc"
     supported.identifier = "example"
-    supported.format_data = {"doctype": "org.iso.example"}
+    supported.format_data = {
+        "doctype": "org.iso.example",
+        "claims": {"org.iso.example": {"name": {"value_type": "tstr"}}},
+    }
     supported.proof_types_supported = {
         "attestation": {"proof_signing_alg_values_supported": ["ES256"]}
     }
+    ex_record.credential_subject = {"org.iso.example": {"name": "alice"}}
     signer = Key.generate(KeyAlg.P256)
     async with profile.session() as session:
+        await signing_key.save(session)
+        supported.vc_additional_data = {
+            "document_signer": {"key_type": "pem", "signing_key_id": signing_key.id}
+        }
         await WalletProvider(
             iss=ISS, jwks={"keys": [{**json.loads(signer.get_jwk_public()), "kid": KID}]}
         ).save(session)
@@ -107,3 +117,8 @@ async def test_real_mdoc_batch_binding_and_native_validity(
         validity = mso["validityInfo"]
         lifetime = validity["validUntil"] - validity["validFrom"]
         assert abs(lifetime.total_seconds() - 30 * 24 * 3600) < 1
+        # The batch shares one status entry, recorded against the exchange.
+        assert mso["status"] == status
+    status_handler.handler.assign_status_entries.assert_awaited_once()
+    args = status_handler.handler.assign_status_entries.await_args.args
+    assert args[1:] == (supported.supported_cred_id, ex_record.exchange_id)

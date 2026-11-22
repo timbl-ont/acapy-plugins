@@ -24,9 +24,9 @@ from aiohttp_apispec import (
     request_schema,
     response_schema,
 )
-from marshmallow import RAISE, ValidationError, fields
+from marshmallow import RAISE, ValidationError, fields, validate, validates_schema
 
-from oid4vc.cred_processor import CredProcessors
+from oid4vc.cred_processor import CredProcessorError, CredProcessors
 from oid4vc.models.supported_cred import (
     SupportedCredential,
     SupportedCredentialSchema,
@@ -34,8 +34,115 @@ from oid4vc.models.supported_cred import (
 )
 from oid4vc.routes import SupportedCredentialMatchSchema, supported_cred_is_unique
 from . import trust_anchor_routes
+from .document_signer import KEY_TYPES, DocumentSignerError, check_document_signer
+from .mdoc.issuer import DEFAULT_VALID_UNTIL_SECONDS
 
 LOGGER = logging.getLogger(__name__)
+
+SIGNING_KEY_ID_REMOVED = (
+    "signing_key_id was removed; use document_signer "
+    '{"key_type": "pem", "signing_key_id": "..."} for a /mso-mdoc/signing-keys key, '
+    'or {"key_type": "wallet", "multikey": "..."} for a wallet key'
+)
+STATUS_LIST_FIELDS_REMOVED = (
+    "status_list_def_id and status_list_base_uri were removed; create a status list "
+    "definition with list_type 'ietf' and this credential configuration's "
+    "supported_cred_id (POST /status-list/defs), as for the other formats"
+)
+REMOVED_FIELDS = {
+    "signing_key_id": SIGNING_KEY_ID_REMOVED,
+    "status_list_def_id": STATUS_LIST_FIELDS_REMOVED,
+    "status_list_base_uri": STATUS_LIST_FIELDS_REMOVED,
+}
+
+
+def _reject_removed_fields(body: Dict[str, Any]) -> None:
+    """Answer a request that sends a removed field with what replaced it."""
+    for field_name, message in REMOVED_FIELDS.items():
+        if field_name in body:
+            raise web.HTTPBadRequest(reason=message)
+
+
+class DocumentSignerSchema(OpenAPISchema):
+    """Where the document signer (DS) key and certificate come from."""
+
+    key_type = fields.Str(
+        required=True,
+        validate=validate.OneOf(KEY_TYPES),
+        metadata={
+            "description": (
+                "'wallet': a P-256 wallet key, certificate from the x509_certs "
+                "plugin (purpose mdoc_ds). 'pem': a legacy /mso-mdoc/signing-keys key."
+            ),
+            "example": "wallet",
+        },
+    )
+    multikey = fields.Str(
+        required=False,
+        metadata={
+            "description": "Multikey of the P-256 wallet key, for key_type 'wallet'.",
+            "example": "zDnaeZv4cPZ9zVfMvxWdjnXc1hFXY9LYM894FyZpVsGHnx3oG",
+        },
+    )
+    signing_key_id = fields.Str(
+        required=False,
+        metadata={"description": "MdocSigningKeyRecord id, for key_type 'pem'."},
+    )
+
+    @validates_schema
+    def check_key_reference(self, data, **kwargs):
+        """Require the key reference that matches key_type."""
+        if data.get("key_type") == "wallet" and not data.get("multikey"):
+            raise ValidationError("multikey is required for key_type 'wallet'")
+        if data.get("key_type") == "pem" and not data.get("signing_key_id"):
+            raise ValidationError("signing_key_id is required for key_type 'pem'")
+
+
+class ValidityInfoSchema(OpenAPISchema):
+    """MSO validityInfo, as seconds after signing."""
+
+    valid_from = fields.Int(
+        required=False,
+        validate=validate.Range(min=0),
+        metadata={"description": "Seconds after signing; default 0.", "example": 0},
+    )
+    valid_until = fields.Int(
+        required=False,
+        validate=validate.Range(min=1),
+        metadata={
+            "description": "Seconds after signing; default 2592000 (30 days).",
+            "example": DEFAULT_VALID_UNTIL_SECONDS,
+        },
+    )
+    expected_update = fields.Int(
+        required=False,
+        validate=validate.Range(min=0),
+        metadata={"description": "Seconds after signing; optional.", "example": 604800},
+    )
+
+    @validates_schema
+    def check_range(self, data, **kwargs):
+        """Require valid_until to be later than valid_from."""
+        if data.get("valid_until", DEFAULT_VALID_UNTIL_SECONDS) <= data.get(
+            "valid_from", 0
+        ):
+            raise ValidationError("valid_until must be greater than valid_from")
+
+
+def _load_signer_fields(body: Dict[str, Any]) -> None:
+    """Validate document_signer and validity_info in a raw request body in place."""
+    _reject_removed_fields(body)
+    try:
+        if body.get("document_signer") is not None:
+            body["document_signer"] = DocumentSignerSchema().load(
+                body["document_signer"], unknown=RAISE
+            )
+        if body.get("validity_info") is not None:
+            body["validity_info"] = ValidityInfoSchema().load(
+                body["validity_info"], unknown=RAISE
+            )
+    except ValidationError as err:
+        raise web.HTTPBadRequest(reason=str(err.messages)) from err
 
 
 class MdocSupportedCredCreateRequestSchema(OpenAPISchema):
@@ -113,34 +220,18 @@ class MdocSupportedCredCreateRequestSchema(OpenAPISchema):
             "description": "PEM-encoded X.509 root CA certificates for verification.",
         },
     )
-    signing_key_id = fields.Str(
-        required=False,
+    document_signer = fields.Nested(
+        DocumentSignerSchema(),
+        required=True,
         metadata={
-            "description": (
-                "ID of a MdocSigningKeyRecord to use for signing. "
-                "Takes precedence over signing_key_pem/signing_cert_pem."
-            ),
+            "description": "Document signer key and certificate source.",
+            "example": {"key_type": "wallet", "multikey": "zDnae..."},
         },
     )
-    status_list_def_id = fields.Str(
+    validity_info = fields.Nested(
+        ValidityInfoSchema(),
         required=False,
-        metadata={
-            "description": (
-                "Status list definition ID (from the status_list plugin) to use "
-                "for assigning revocation entries at credential issuance time."
-            ),
-        },
-    )
-    status_list_base_uri = fields.Str(
-        required=False,
-        metadata={
-            "description": (
-                "Base URI for published status lists "
-                "(e.g. 'https://issuer.example.com/status'). "
-                "Combined with the list_number to build the status URI embedded "
-                "in issued credentials."
-            ),
-        },
+        metadata={"description": "MSO validity range, as seconds after signing."},
     )
 
 
@@ -181,23 +272,15 @@ class MdocSupportedCredUpdateRequestSchema(OpenAPISchema):
             "description": "PEM-encoded X.509 root CA certificates for verification.",
         },
     )
-    signing_key_id = fields.Str(
+    document_signer = fields.Nested(
+        DocumentSignerSchema(),
         required=False,
-        metadata={
-            "description": "ID of a MdocSigningKeyRecord to use for signing.",
-        },
+        metadata={"description": "Document signer key and certificate source."},
     )
-    status_list_def_id = fields.Str(
+    validity_info = fields.Nested(
+        ValidityInfoSchema(),
         required=False,
-        metadata={
-            "description": "Status list definition ID for revocation entry assignment.",
-        },
-    )
-    status_list_base_uri = fields.Str(
-        required=False,
-        metadata={
-            "description": "Base URI for published status lists.",
-        },
+        metadata={"description": "MSO validity range, as seconds after signing."},
     )
 
 
@@ -215,6 +298,7 @@ async def supported_credential_create_mdoc(request: web.Request):
     profile = context.profile
 
     body: Dict[str, Any] = await request.json()
+    _reject_removed_fields(body)
     try:
         body: Dict[str, Any] = MdocSupportedCredCreateRequestSchema().load(
             body, unknown=RAISE
@@ -238,9 +322,8 @@ async def supported_credential_create_mdoc(request: web.Request):
 
     vc_additional_data = {}
     vc_additional_data["trust_anchors"] = body.pop("trust_anchors", None)
-    vc_additional_data["signing_key_id"] = body.pop("signing_key_id", None)
-    vc_additional_data["status_list_def_id"] = body.pop("status_list_def_id", None)
-    vc_additional_data["status_list_base_uri"] = body.pop("status_list_base_uri", None)
+    vc_additional_data["document_signer"] = body.pop("document_signer")
+    vc_additional_data["validity_info"] = body.pop("validity_info", None)
 
     record = SupportedCredential(
         **body,
@@ -258,10 +341,18 @@ async def supported_credential_create_mdoc(request: web.Request):
     processor = registered_processors.issuer_for_format(record.format)
     try:
         processor.validate_supported_credential(record)
-    except ValueError as err:
+    except (ValueError, CredProcessorError) as err:
         raise web.HTTPBadRequest(reason=str(err)) from err
 
     async with profile.session() as session:
+        try:
+            warnings = await check_document_signer(
+                session, vc_additional_data["document_signer"]
+            )
+        except DocumentSignerError as err:
+            raise web.HTTPBadRequest(reason=str(err)) from err
+        for warning in warnings:
+            LOGGER.warning("Supported credential %s: %s", record.identifier, warning)
         await record.save(session, reason="Save credential supported record.")
 
     return web.json_response(record.serialize())
@@ -307,18 +398,12 @@ async def mdoc_supported_cred_update_helper(
         vc_additional_data["trust_anchors"] = body.pop("trust_anchors")
     else:
         body.pop("trust_anchors", None)
-    if "signing_key_id" in body:
-        vc_additional_data["signing_key_id"] = body.pop("signing_key_id")
-    else:
-        body.pop("signing_key_id", None)
-    if "status_list_def_id" in body:
-        vc_additional_data["status_list_def_id"] = body.pop("status_list_def_id")
-    else:
-        body.pop("status_list_def_id", None)
-    if "status_list_base_uri" in body:
-        vc_additional_data["status_list_base_uri"] = body.pop("status_list_base_uri")
-    else:
-        body.pop("status_list_base_uri", None)
+    for key in ("document_signer", "validity_info"):
+        if key in body:
+            vc_additional_data[key] = body.pop(key)
+    vc_additional_data.pop("signing_key_id", None)
+    vc_additional_data.pop("status_list_def_id", None)
+    vc_additional_data.pop("status_list_base_uri", None)
 
     if "cryptographic_binding_methods_supported" in body:
         record.cryptographic_binding_methods_supported = body[
@@ -335,6 +420,12 @@ async def mdoc_supported_cred_update_helper(
 
     record.format_data = format_data
     record.vc_additional_data = vc_additional_data
+
+    warnings = await check_document_signer(
+        session, vc_additional_data.get("document_signer")
+    )
+    for warning in warnings:
+        LOGGER.warning("Supported credential %s: %s", record.identifier, warning)
 
     await record.save(session)
     return record
@@ -357,6 +448,7 @@ async def update_supported_credential_mdoc(request: web.Request):
     context: AdminRequestContext = request["context"]
     supported_cred_id = request.match_info["supported_cred_id"]
     body: Dict[str, Any] = await request.json()
+    _load_signer_fields(body)
 
     LOGGER.debug(
         "Updating mdoc supported credential %s with request payload: %s",
@@ -375,6 +467,8 @@ async def update_supported_credential_mdoc(request: web.Request):
         raise web.HTTPNotFound(reason=err.roll_up) from err
     except (StorageError, BaseModelError) as err:
         raise web.HTTPBadRequest(reason=err.roll_up) from err
+    except DocumentSignerError as err:
+        raise web.HTTPBadRequest(reason=str(err)) from err
 
     registered_processors = context.inject(CredProcessors)
     if record.format not in registered_processors.issuers:
@@ -386,7 +480,7 @@ async def update_supported_credential_mdoc(request: web.Request):
     processor = registered_processors.issuer_for_format(record.format)
     try:
         processor.validate_supported_credential(record)
-    except ValueError as err:
+    except (ValueError, CredProcessorError) as err:
         raise web.HTTPBadRequest(reason=str(err)) from err
 
     return web.json_response(record.serialize())

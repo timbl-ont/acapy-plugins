@@ -9,9 +9,6 @@ import base64
 import json
 import logging
 import re
-from datetime import UTC, datetime
-
-from cryptography import x509 as _x509
 from typing import Any, Dict, List, Optional
 
 from acapy_agent.admin.request_context import AdminRequestContext
@@ -28,41 +25,48 @@ from oid4vc.models.exchange import OID4VCIExchangeRecord
 from oid4vc.models.presentation import OID4VPPresentation
 from oid4vc.models.supported_cred import SupportedCredential
 from oid4vc.pop_result import PopResult
+from oid4vc.status_handler import StatusHandler
 
-from .mdoc.issuer import MDL_MANDATORY_FIELDS, isomdl_mdoc_sign
+from .document_signer import (
+    document_signer_from_config,
+    validate_document_signer_config,
+)
 from .mdoc.cred_verifier import MsoMdocCredVerifier
+from .mdoc.issuer import MsoValidity, issue_mdoc
+from .mdoc.namespaces import (
+    DocumentEncodingError,
+    declared_claims,
+    encode_document,
+    validate_claims_config,
+)
 from .mdoc.pres_verifier import MsoMdocPresVerifier
-from .payload import normalize_mdoc_result, prepare_mdoc_payload
 from .trust_anchor import TrustAnchorRecord
-from .signing_key import MdocSigningKeyRecord
 
-__all__ = [
-    "MsoMdocCredProcessor",
-    "check_certificate_not_expired",
-]
+__all__ = ["MsoMdocCredProcessor"]
 
 LOGGER = logging.getLogger(__name__)
 
 
-def check_certificate_not_expired(cert_pem: str) -> None:
-    """Validate that a PEM-encoded X.509 certificate is currently valid."""
-    if not cert_pem or not cert_pem.strip():
-        raise CredProcessorError("Empty certificate PEM string")
+def mso_status(status: Any) -> Optional[Dict[str, Any]]:
+    """The MSO ``status`` from the status handler's entries for a credential.
 
-    try:
-        cert = _x509.load_pem_x509_certificate(cert_pem.strip().encode())
-    except Exception as exc:
-        raise CredProcessorError(
-            f"Invalid certificate PEM — could not parse: {exc}"
-        ) from exc
-
-    now = datetime.now(UTC)
-    if cert.not_valid_before_utc > now:
-        nb = cert.not_valid_before_utc.isoformat()
-        raise CredProcessorError(f"Certificate is not yet valid (NotBefore={nb})")
-    if cert.not_valid_after_utc < now:
-        na = cert.not_valid_after_utc.isoformat()
-        raise CredProcessorError(f"Certificate has expired (NotAfter={na})")
+    An mdoc carries an IETF Token Status List reference,
+    ``{"status_list": {"idx": ..., "uri": ...}}``, which status list definitions
+    with ``list_type`` ``ietf`` produce. Other entries (W3C Bitstring Status
+    List) cannot go in the MSO and are ignored with a warning.
+    """
+    entries = status if isinstance(status, list) else ([status] if status else [])
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("status_list"), dict):
+            return {"status_list": entry["status_list"]}
+    if entries:
+        LOGGER.warning(
+            "mso_mdoc status needs a status list definition with list_type 'ietf'; "
+            "ignoring %d other status entr%s",
+            len(entries),
+            "y" if len(entries) == 1 else "ies",
+        )
+    return None
 
 
 async def _get_trust_anchors(
@@ -278,139 +282,72 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
 
         return None
 
-    def _build_headers(
-        self, doctype: str, device_key_str: Optional[str]
-    ) -> Dict[str, Any]:
-        """Build mso_mdoc headers according to OID4VCI specification."""
-        headers = {"doctype": doctype}
-        if device_key_str:
-            headers["deviceKey"] = device_key_str
-        return headers
-
-    async def _resolve_signing_key(
-        self,
-        supported: SupportedCredential,
-        profile: Optional[Profile] = None,
-    ) -> Dict[str, Any]:
-        """Resolve the signing key for credential issuance.
-
-        Resolution order:
-        1. ``signing_key_id`` in ``vc_additional_data`` — fetch a specific
-           ``MdocSigningKeyRecord`` by ID.
-        2. ``MdocSigningKeyRecord`` query by doctype — first matching record.
-
-        Returns:
-            Dict with ``private_key_pem`` and ``certificate_pem``.
-        """
-        additional = supported.vc_additional_data or {}
-        doctype = (supported.format_data or {}).get("doctype")
-
-        # 1. Explicit signing key record ID
-        signing_key_id = additional.get("signing_key_id")
-        if signing_key_id and profile:
-            try:
-                async with profile.session() as session:
-                    key_record = await MdocSigningKeyRecord.retrieve_by_id(
-                        session, signing_key_id
-                    )
-                if key_record.private_key_pem and key_record.certificate_pem:
-                    return {
-                        "private_key_pem": key_record.private_key_pem,
-                        "certificate_pem": key_record.certificate_pem,
-                    }
-            except Exception as exc:
-                LOGGER.warning(
-                    "Could not load MdocSigningKeyRecord %s: %s", signing_key_id, exc
-                )
-
-        # 2. MdocSigningKeyRecord query by doctype (or any key if no doctype)
-        if profile:
-            try:
-                async with profile.session() as session:
-                    tag_filter = {"doctype": doctype} if doctype else None
-                    key_records = await MdocSigningKeyRecord.query(
-                        session, tag_filter=tag_filter
-                    )
-                    if not key_records and doctype:
-                        # fall back to wildcard keys (no doctype set)
-                        key_records = await MdocSigningKeyRecord.query(session)
-                    for key_record in key_records:
-                        if key_record.private_key_pem and key_record.certificate_pem:
-                            return {
-                                "private_key_pem": key_record.private_key_pem,
-                                "certificate_pem": key_record.certificate_pem,
-                            }
-            except Exception as exc:
-                LOGGER.debug("MdocSigningKeyRecord query failed: %s", exc)
-
-        raise CredProcessorError(
-            "No mDoc signing key configured. "
-            "Create a MdocSigningKeyRecord via POST /mso-mdoc/signing-keys."
+    @staticmethod
+    def _declared_claims(supported: SupportedCredential) -> Dict[str, Dict[str, dict]]:
+        """Claims the configuration declares, by namespace and element."""
+        return declared_claims(
+            (supported.format_data or {}).get("claims"),
+            (supported.credential_metadata or {}).get("claims"),
         )
 
-    async def _assign_status_entry(
+    @staticmethod
+    def _holder_jwk(pop: PopResult, device_key_str: Optional[str]) -> Dict[str, Any]:
+        """The holder's P-256 device key as a public JWK (kty, crv, x, y only).
+
+        isomdl rejects other members such as ``alg`` and ``use``, and the device
+        key in the MSO must never carry private parameters.
+        """
+        jwk = pop.holder_jwk
+        if not isinstance(jwk, dict) and device_key_str:
+            try:
+                jwk = json.loads(device_key_str)
+            except (json.JSONDecodeError, TypeError):
+                raise CredProcessorError(
+                    "Holder key identifier provided but a full EC JWK is required "
+                    "for mso_mdoc device key binding. Provide holder_jwk in the "
+                    "proof of possession."
+                ) from None
+        if not isinstance(jwk, dict):
+            raise CredProcessorError(
+                "No device key available: provide holder_jwk, holder_kid, or "
+                "verification_method"
+            )
+        if jwk.get("kty") != "EC" or jwk.get("crv") != "P-256":
+            raise CredProcessorError(
+                "mso_mdoc requires a P-256 EC holder key, got "
+                f"kty={jwk.get('kty')} crv={jwk.get('crv')}"
+            )
+        return {k: jwk[k] for k in ("kty", "crv", "x", "y") if k in jwk}
+
+    async def _status_claim(
         self,
         context: AdminRequestContext,
         supported: SupportedCredential,
-        doctype: str,
+        ex_record: OID4VCIExchangeRecord,
+        batch: BatchIssuance | None,
     ) -> Optional[Dict[str, Any]]:
-        """Optionally assign a Token Status List entry for the credential.
+        """Assign a Token Status List entry through the configured status handler.
 
-        If ``status_list_def_id`` and ``status_list_base_uri`` are set in the
-        ``SupportedCredential.vc_additional_data``, this method attempts to
-        assign an entry from the status_list plugin and returns the status
-        claim dict to embed in the payload.
-
-        Returns ``None`` if the status list plugin is not installed or not
-        configured for this credential type.
+        Like the other formats, the entry is recorded against the exchange, so
+        ``PATCH /status-list/defs/{def_id}/creds/{exchange_id}`` revokes the
+        credential. Returns None without a status handler or a status list
+        definition for the credential configuration.
         """
-        additional = supported.vc_additional_data or {}
-        definition_id = additional.get("status_list_def_id")
-        base_uri = (additional.get("status_list_base_uri") or "").rstrip("/")
-
-        if not definition_id or not base_uri:
+        status_handler = context.inject_or(StatusHandler)
+        if not status_handler:
             return None
-
-        try:
-            from status_list.status_list.v1_0 import (  # noqa: PLC0415
-                status_handler as _status_handler,
+        if batch:
+            status = await batch.assign_status(
+                status_handler.assign_status_entries,
+                context,
+                supported.supported_cred_id,
+                ex_record.exchange_id,
             )
-        except ImportError:
-            LOGGER.debug(
-                "status_list plugin not installed; skipping revocation entry assignment"
+        else:
+            status = await status_handler.assign_status_entries(
+                context, supported.supported_cred_id, ex_record.exchange_id
             )
-            return None
-
-        try:
-            entry = await _status_handler.assign_status_list_entry(context, definition_id)
-        except Exception as exc:
-            LOGGER.warning(
-                "Failed to assign status list entry for definition %s: %s",
-                definition_id,
-                exc,
-            )
-            return None
-
-        if entry is None:
-            LOGGER.warning(
-                "Status list entry assignment returned None for definition %s",
-                definition_id,
-            )
-            return None
-
-        list_number = entry.get("list_number", "")
-        list_index = entry.get("list_index", 0)
-        status_uri = f"{base_uri}/{list_number}"
-
-        LOGGER.info(
-            "Assigned status list entry: doctype=%s list_number=%s index=%d uri=%s",
-            doctype,
-            list_number,
-            list_index,
-            status_uri,
-        )
-
-        return {"status_list": {"idx": list_index, "uri": status_uri}}
+        return mso_status(status)
 
     async def issue(
         self,
@@ -444,101 +381,34 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
             raise CredProcessorError("Supported credential must have format_data")
 
         try:
-            # Validate and extract doctype
             doctype = self._validate_and_get_doctype(body, supported)
-
-            # Extract device key for holder binding
             device_key_str = self._extract_device_key(pop, ex_record)
+            holder_jwk = self._holder_jwk(pop, device_key_str)
 
-            # Build mso_mdoc headers
-            headers = self._build_headers(doctype, device_key_str)
-
-            # Get payload
-            payload = prepare_mdoc_payload(ex_record.credential_subject, doctype)
-
-            # Resolve signing key — check MdocSigningKeyRecord first, then
-            # fall back to vc_additional_data and env vars
-            key_data = await self._resolve_signing_key(supported, context.profile)
-            private_key_pem = key_data["private_key_pem"]
-            certificate_pem = key_data["certificate_pem"]
-
-            # Validity-period guard: reject expired or not-yet-valid certificates
-            # before passing them to the Rust signing library.
-            check_certificate_not_expired(certificate_pem)
-
-            if not device_key_str and not pop.holder_jwk:
-                raise CredProcessorError(
-                    "No device key available: provide holder_jwk, "
-                    "holder_kid, or verification_method"
-                )
-
-            # Clean up JWK for isomdl (remove extra fields like kid, alg, use)
-            # isomdl rejects alg and use fields in the holder JWK
-            if pop.holder_jwk and isinstance(pop.holder_jwk, dict):
-                if pop.holder_jwk.get("kty") != "EC":
-                    raise CredProcessorError(
-                        "mso_mdoc requires an EC holder key, "
-                        f"got kty={pop.holder_jwk.get('kty')}"
-                    )
-                holder_jwk_clean = {
-                    k: v
-                    for k, v in pop.holder_jwk.items()
-                    if k in ["kty", "crv", "x", "y"]
-                }
-            else:
-                # Fallback: build a minimal JWK placeholder from device_key_str
-                # The Rust library needs a JWK dict for the holder key binding
-                holder_jwk_clean = None
-
-            # Issue mDoc using isomdl-uniffi library with ISO 18013-5 compliance
-            LOGGER.debug(
-                "Issuing mso_mdoc with holder_jwk=%s headers=%s payload_keys=%s",
-                holder_jwk_clean,
-                headers,
-                (list(payload.keys()) if isinstance(payload, dict) else type(payload)),
-            )
-            # Use cleaned JWK if available, otherwise fall back to
-            # the device key extracted from holder_kid / verification_method.
-            # isomdl_mdoc_sign expects a dict-like JWK.
-            signing_holder_key = holder_jwk_clean
-            if signing_holder_key is None and device_key_str:
-                try:
-                    signing_holder_key = json.loads(device_key_str)
-                except (json.JSONDecodeError, TypeError):
-                    # device_key_str is a key-id, not a JWK —
-                    # cannot bind holder key without a JWK.
-                    raise CredProcessorError(
-                        "Holder key identifier provided but a full "
-                        "EC JWK is required for mso_mdoc device "
-                        "key binding. Provide holder_jwk in the "
-                        "proof of possession."
-                    )
-
-            if signing_holder_key is None:
-                raise CredProcessorError(
-                    "Unable to resolve a holder JWK for device key binding."
-                )
-
-            if batch:
-                status_claim = await batch.assign_status(
-                    self._assign_status_entry,
-                    context,
-                    supported,
-                    doctype,
-                )
-            else:
-                status_claim = await self._assign_status_entry(
-                    context, supported, doctype
-                )
-            if status_claim:
-                payload["status"] = status_claim
-
-            mso_mdoc = isomdl_mdoc_sign(
-                signing_holder_key, headers, payload, certificate_pem, private_key_pem
+            # Encode the subject as CBOR element values per namespace; the
+            # profile for the doctype validates the standard namespaces.
+            namespaces = encode_document(
+                doctype,
+                ex_record.credential_subject,
+                self._declared_claims(supported),
             )
 
-            # Normalize mDoc result handling for robust string/bytes processing
-            mso_mdoc = normalize_mdoc_result(mso_mdoc)
+            additional = supported.vc_additional_data or {}
+            signer = document_signer_from_config(additional)
+            validity = MsoValidity.from_config(additional.get("validity_info"))
+
+            status_claim = await self._status_claim(context, supported, ex_record, batch)
+
+            async with context.profile.session() as session:
+                mso_mdoc = await issue_mdoc(
+                    session,
+                    doctype=doctype,
+                    namespaces=namespaces,
+                    holder_jwk=holder_jwk,
+                    signer=signer,
+                    validity=validity,
+                    status_claim=status_claim,
+                )
 
             LOGGER.info(
                 "Issued mso_mdoc credential with doctype: %s, format: %s",
@@ -552,48 +422,24 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
             # Surface the underlying exception text in the CredProcessorError
             raise CredProcessorError(f"Failed to issue mso_mdoc credential: {ex}") from ex
 
-        # issuer_signed_b64() already returns base64url without padding
-        # (ISO 18013-5 §8.3 compliant) — exactly what OID4VCI 1.0 §7.3.1 requires.
-        LOGGER.debug("mso_mdoc credential: %s", mso_mdoc)
-
         return mso_mdoc
 
-    def _prepare_payload(
-        self, payload: Dict[str, Any], doctype: str = None
-    ) -> Dict[str, Any]:
-        return prepare_mdoc_payload(payload, doctype)
-
-    def _normalize_mdoc_result(self, result: Any) -> str:
-        return normalize_mdoc_result(result)
-
     def validate_credential_subject(self, supported: SupportedCredential, subject: dict):
-        """Validate the credential subject."""
+        """Validate the credential subject by encoding it.
+
+        Callers get an actionable error when the exchange is created rather than
+        at issuance. Errors name the namespace and element, never the value.
+        """
         if not subject:
             raise CredProcessorError("Credential subject cannot be empty")
-
         if not isinstance(subject, dict):
             raise CredProcessorError("Credential subject must be a dictionary")
 
-        # For mDL doctypes, validate mandatory ISO 18013-5 fields early so
-        # that the API caller gets an actionable error at exchange-creation
-        # time rather than an opaque FFI error at issuance time.
         doctype = (supported.format_data or {}).get("doctype", "")
-        if doctype == "org.iso.18013.5.1.mDL":
-            # The subject may be namespace-wrapped or flat.
-            claims = subject.get("org.iso.18013.5.1", subject)
-            # driving_privileges defaults to [] at issuance time, so
-            # exclude it from the early check.
-            missing = [
-                f
-                for f in MDL_MANDATORY_FIELDS
-                if f != "driving_privileges" and f not in claims
-            ]
-            if missing:
-                raise CredProcessorError(
-                    f"mDL credential_subject is missing mandatory ISO 18013-5 "
-                    f"data element(s): {', '.join(missing)}"
-                )
-
+        try:
+            encode_document(doctype, subject, self._declared_claims(supported))
+        except DocumentEncodingError as err:
+            raise CredProcessorError(f"Invalid mso_mdoc credential subject: {err}")
         return True
 
     def validate_supported_credential(self, supported: SupportedCredential):
@@ -603,6 +449,18 @@ class MsoMdocCredProcessor(Issuer, CredVerifier, PresVerifier):
 
         # Validate doctype presence and format
         self._validate_and_get_doctype({}, supported)
+
+        try:
+            validate_claims_config(supported.format_data.get("claims"))
+        except DocumentEncodingError as err:
+            raise CredProcessorError(f"Invalid claims: {err}")
+
+        additional = supported.vc_additional_data or {}
+        validate_document_signer_config(additional.get("document_signer"))
+        try:
+            MsoValidity.from_config(additional.get("validity_info"))
+        except ValueError as err:
+            raise CredProcessorError(str(err))
 
         return True
 

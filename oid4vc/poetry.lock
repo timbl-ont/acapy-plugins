@@ -3950,10 +3950,10 @@ propcache = ">=0.2.1"
 
 [extras]
 aca-py = ["acapy-agent"]
-mso-mdoc = ["cbor-diag", "cwt", "pycose"]
+mso-mdoc = ["cbor-diag", "cbor2", "cwt", "pycose"]
 sd-jwt-vc = ["jsonpointer"]
 
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.13"
-content-hash = "441ae6d872347f983263fa8cb86a3d86c75ed9d55ec1f737518f6403de2285af"
+content-hash = "6fd49dcba3cd0be0c1535ea2176b8c82c5476f4fa72adc72722aa839e27e8bbb"

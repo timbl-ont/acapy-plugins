@@ -1,207 +1,141 @@
-"""Operations supporting mso_mdoc issuance using isomdl-uniffi.
+"""mso_mdoc issuance with isomdl-uniffi and an external document signer.
 
-This module implements ISO/IEC 18013-5:2021 compliant mobile document issuance
-using the isomdl-uniffi Rust library via UniFFI bindings. It provides
-cryptographic operations for creating signed mobile documents (mDocs) including
-mobile driver's licenses (mDLs).
+The mdoc is built in three steps, so that the plugin never needs the issuer's
+private key:
+
+1. ``PreparedMdoc.new_from_cbor`` builds the mdoc from CBOR-encoded element
+   values (see ``mso_mdoc.mdoc.namespaces``), the holder's device key, the
+   status list reference and the MSO validity, and returns the COSE
+   ToBeSigned bytes of the MSO.
+2. The document signer signs those bytes (``mso_mdoc.document_signer``): a
+   wallet key through ``wallet.sign_message``, or a legacy PEM key.
+3. ``PreparedMdoc.complete`` adds the signature and the document signer's
+   certificate chain, and the result is serialised as IssuerSigned.
 
 Protocol Compliance:
 - OpenID4VCI 1.0 § E.1.1: mso_mdoc Credential Format
-  https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html#appendix-E.1.1
-- ISO/IEC 18013-5:2021 § 8: Mobile document format and structure
-- ISO/IEC 18013-5:2021 § 9: Cryptographic mechanisms
-- RFC 8152: CBOR Object Signing and Encryption (COSE)
-- RFC 8949: Concise Binary Object Representation (CBOR)
-- RFC 7517: JSON Web Key (JWK) format for key material
-
-The mso_mdoc format is defined in OpenID4VCI 1.0 Appendix E.1.1 as a specific
-credential format that follows the ISO 18013-5 mobile document structure.
+- ISO/IEC 18013-5:2021 § 9.1.2: Mobile security object (MSO) and validityInfo
+- RFC 9052: COSE_Sign1 with ES256
 """
 
 import json
 import logging
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping, Optional
 
-# ISO 18013-5 § 8.4: Presentation session
-# ISO 18013-5 § 9.1.3.5: ECDSA P-256 key pairs
-# ISO 18013-5 § 8.4.1: Session establishment
-# ISO 18013-5 § 8.4.2: Response handling
-# Test mDL generation for ISO 18013-5 compliance
-# Import ISO 18013-5 compliant mDoc operations from isomdl-uniffi
-# These provide cryptographically secure implementations of:
-# - mDoc creation and signing (ISO 18013-5 § 8.3)
-# - Presentation protocols (ISO 18013-5 § 8.4)
-# - P-256 elliptic curve cryptography (ISO 18013-5 § 9.1.3.5)
-from isomdl_uniffi import Mdoc  # ISO 18013-5 § 8.3: Mobile document structure
+from acapy_agent.core.profile import ProfileSession
+from isomdl_uniffi import Mdoc, PreparedMdoc
 
-from .utils import extract_signing_cert
+from ..document_signer import DocumentSigner, DocumentSignerError
 
 LOGGER = logging.getLogger(__name__)
 
-
-# ISO 18013-5 mandatory data elements for the org.iso.18013.5.1 namespace.
-# These are non-Option fields in the upstream isomdl OrgIso1801351 struct;
-# omitting any of them causes a GeneralConstructionError from the Rust FFI.
-MDL_MANDATORY_FIELDS = (
-    "family_name",
-    "given_name",
-    "birth_date",
-    "issue_date",
-    "expiry_date",
-    "issuing_country",
-    "issuing_authority",
-    "document_number",
-    "portrait",
-    "driving_privileges",
-    "un_distinguishing_sign",
-)
+SIGNATURE_ALGORITHM = "ES256"
+DEFAULT_VALID_UNTIL_SECONDS = 30 * 24 * 60 * 60
 
 
-def _prepare_mdl_namespaces(
-    payload: Mapping[str, Any],
-) -> tuple[str, Optional[str]]:
-    """Prepare mDL namespace items for create_and_sign_mdl.
+def rfc3339(moment: datetime) -> str:
+    """``moment`` in UTC as ``YYYY-MM-DDTHH:MM:SSZ``."""
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    Args:
-        payload: The credential payload
 
-    Returns:
-        Tuple of (mdl_items_json, aamva_items_json) where aamva_items_json
-        may be None. Both are JSON-serialized dicts; isomdl-uniffi handles
-        CBOR encoding internally.
+@dataclass(frozen=True)
+class MsoValidity:
+    """The MSO validityInfo times. ``valid_from`` None means the signing time."""
 
-    Raises:
-        ValueError: If any ISO 18013-5 mandatory data element is missing.
-    """
-    mdl_payload = payload.get("org.iso.18013.5.1", payload)
-    mdl_items = {k: v for k, v in mdl_payload.items() if k != "org.iso.18013.5.1.aamva"}
+    valid_from: Optional[datetime]
+    valid_until: datetime
+    expected_update: Optional[datetime]
 
-    # isomdl-uniffi's create_and_sign_mdl requires driving_privileges even
-    # when none are granted — default to an empty array so callers that omit
-    # the field don't hit a GeneralConstructionError.
-    mdl_items.setdefault("driving_privileges", [])
+    @classmethod
+    def from_config(
+        cls, validity_info: Optional[Mapping[str, Any]], now: Optional[datetime] = None
+    ) -> "MsoValidity":
+        """Times from a ``validity_info`` configuration of seconds after signing.
 
-    # Validate mandatory fields before calling into the Rust FFI so that
-    # callers get a clear error message instead of an opaque
-    # GeneralConstructionError.
-    missing = [f for f in MDL_MANDATORY_FIELDS if f not in mdl_items]
-    if missing:
-        raise ValueError(
-            f"mDL credential_subject is missing mandatory ISO 18013-5 "
-            f"data element(s): {', '.join(missing)}"
+        ``valid_from`` defaults to 0 (the signing time), ``valid_until`` to 30
+        days, and ``expected_update`` to none. Raises ``ValueError`` for values
+        that are not non-negative integers or a ``valid_until`` that is not
+        later than ``valid_from``.
+        """
+        config = dict(validity_info or {})
+        unknown = set(config) - {"valid_from", "valid_until", "expected_update"}
+        if unknown:
+            raise ValueError(
+                f"validity_info has unknown keys: {', '.join(sorted(unknown))}"
+            )
+
+        def seconds(key: str, default: Optional[int]) -> Optional[int]:
+            value = config.get(key, default)
+            if value is None:
+                return None
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"validity_info {key} must be a non-negative integer")
+            return value
+
+        from_s = seconds("valid_from", 0)
+        until_s = seconds("valid_until", DEFAULT_VALID_UNTIL_SECONDS)
+        update_s = seconds("expected_update", None)
+        if until_s <= from_s:
+            raise ValueError("validity_info valid_until must be greater than valid_from")
+
+        now = (now or datetime.now(UTC)).replace(microsecond=0)
+        return cls(
+            valid_from=now + timedelta(seconds=from_s) if from_s else None,
+            valid_until=now + timedelta(seconds=until_s),
+            expected_update=(
+                now + timedelta(seconds=update_s) if update_s is not None else None
+            ),
         )
 
-    aamva_payload = payload.get("org.iso.18013.5.1.aamva")
-    aamva_items_json = json.dumps(aamva_payload) if aamva_payload else None
 
-    return json.dumps(mdl_items), aamva_items_json
-
-
-def _prepare_generic_namespaces(doctype: str, payload: Mapping[str, Any]) -> dict:
-    """Prepare namespaces for generic doctypes.
-
-    Args:
-        doctype: The document type
-        payload: The credential payload
-
-    Returns:
-        Dictionary of namespaces with JSON-encoded element values
-        for use with Mdoc.create_and_sign.
-    """
-    encoded_payload = {k: json.dumps(v) for k, v in payload.items()}
-    return {doctype: encoded_payload}
-
-
-def isomdl_mdoc_sign(
-    jwk: dict,
-    headers: Mapping[str, Any],
-    payload: Mapping[str, Any],
-    iaca_cert_pem: str,
-    iaca_key_pem: str,
+async def issue_mdoc(
+    session: ProfileSession,
+    *,
+    doctype: str,
+    namespaces: Mapping[str, Mapping[str, bytes]],
+    holder_jwk: Mapping[str, Any],
+    signer: DocumentSigner,
+    validity: MsoValidity,
+    status_claim: Optional[Mapping[str, Any]] = None,
 ) -> str:
-    """Create a signed mso_mdoc using isomdl-uniffi.
+    """Issue an mdoc and return it as base64url IssuerSigned.
 
-    Creates and signs a mobile security object (MSO) compliant with
-    ISO 18013-5 § 9.1.3. The signing uses ECDSA with P-256 curve (ES256)
-    as mandated by ISO 18013-5 § 9.1.3.5 for mDoc cryptographic protection.
-
-    Protocol Compliance:
-    - ISO 18013-5 § 9.1.3: Mobile security object (MSO) structure
-    - ISO 18013-5 § 9.1.3.5: ECDSA P-256 signature algorithm
-    - RFC 8152: COSE signing for MSO authentication
-    - RFC 7517: JWK format for key material input
-
-    Args:
-        jwk: The signing key in JWK format
-        headers: Header parameters including doctype
-        payload: The credential data to sign
-        iaca_cert_pem: Issuer certificate in PEM format
-        iaca_key_pem: Issuer private key in PEM format
-
-    Returns:
-        CBOR-encoded mDoc as string
+    ``namespaces`` holds CBOR-encoded element values by namespace and element
+    identifier. ``status_claim`` (``{"status_list": {"idx": ..., "uri": ...}}``)
+    is stored as the MSO ``status``.
     """
-    if not isinstance(headers, dict):
-        raise ValueError("missing headers.")
+    chain_pem = await signer.chain_pem(session, validity.valid_until)
 
-    if not isinstance(payload, dict):
-        raise ValueError("missing payload.")
+    prepared = PreparedMdoc.new_from_cbor(
+        doctype,
+        {ns: dict(elements) for ns, elements in namespaces.items()},
+        json.dumps(dict(holder_jwk)),
+        SIGNATURE_ALGORITHM,
+        json.dumps(dict(status_claim)) if status_claim else None,
+        rfc3339(validity.valid_from) if validity.valid_from else None,
+        rfc3339(validity.valid_until),
+        rfc3339(validity.expected_update) if validity.expected_update else None,
+    )
 
-    try:
-        doctype = headers.get("doctype")
-        holder_jwk = json.dumps(jwk)
+    signature = await signer.sign(session, prepared.signature_payload())
+    if len(signature) != 64:
+        raise DocumentSignerError(
+            f"{SIGNATURE_ALGORITHM} document signer returned {len(signature)} bytes; "
+            "expected the raw 64-byte r || s"
+        )
 
-        LOGGER.debug("holder_jwk: %s", holder_jwk)
-        LOGGER.debug("iaca_cert_pem length: %d", len(iaca_cert_pem))
-        LOGGER.debug("iaca_key_pem length: %d", len(iaca_key_pem))
-
-        # If iaca_cert_pem contains a chain (multiple PEM blocks), Rust's
-        # x509_cert crate only reads the first certificate and silently drops
-        # everything after it.  Extract just the signing cert (first block)
-        # so Rust always receives a single, unambiguous certificate.
-        signing_cert_pem = extract_signing_cert(iaca_cert_pem)
-        if signing_cert_pem != iaca_cert_pem:
-            LOGGER.info(
-                "iaca_cert_pem contained a PEM chain; extracted first certificate "
-                "(%d bytes) as the signing cert",
-                len(signing_cert_pem),
-            )
-
-        # Prepare namespaces based on doctype
-        if doctype == "org.iso.18013.5.1.mDL":
-            # Use the dedicated mDL constructor — accepts JSON strings and
-            # handles CBOR encoding internally (isomdl-uniffi >= create_and_sign_mdl)
-            mdl_items, aamva_items = _prepare_mdl_namespaces(payload)
-            LOGGER.info("Creating mDL mdoc via create_and_sign_mdl")
-            mdoc = Mdoc.create_and_sign_mdl(
-                mdl_items,
-                aamva_items,
-                holder_jwk,
-                signing_cert_pem,
-                iaca_key_pem,
-            )
-        else:
-            namespaces = _prepare_generic_namespaces(doctype, payload)
-            LOGGER.info("Creating mdoc with namespaces: %s", list(namespaces.keys()))
-            mdoc = Mdoc.create_and_sign(
-                doctype,
-                namespaces,
-                holder_jwk,
-                signing_cert_pem,
-                iaca_key_pem,
-            )
-
-        LOGGER.info("Generated mdoc with doctype: %s", mdoc.doctype())
-
-        # Serialize as ISO 18013-5 §8.3 compliant IssuerSigned CBOR (camelCase keys,
-        # nameSpaces as arrays). issuer_signed_b64() uses the upstream IssuerSigned
-        # struct directly, which carries the correct serde renames, eliminating the
-        # need for any post-serialization key patching.
-        return mdoc.issuer_signed_b64()
-
-    except Exception as ex:
-        LOGGER.error("Failed to create mdoc with isomdl: %r", ex)
-        raise ValueError(f"Failed to create mdoc: {ex!r}") from ex
+    mdoc = prepared.complete(chain_pem, signature)
+    LOGGER.info(
+        "Issued mdoc %s via PreparedMdoc.new_from_cbor with namespaces %s",
+        doctype,
+        sorted(namespaces),
+    )
+    # issuer_signed_b64() serialises IssuerSigned with the ISO 18013-5 § 8.3 keys
+    # (camelCase, nameSpaces as arrays) as base64url without padding, which is
+    # what OID4VCI 1.0 § 7.3.1 expects.
+    return mdoc.issuer_signed_b64()
 
 
 def parse_mdoc(cbor_data: str) -> Mdoc:

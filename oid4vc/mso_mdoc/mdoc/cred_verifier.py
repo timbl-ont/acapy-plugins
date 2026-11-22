@@ -186,8 +186,11 @@ class MsoMdocCredVerifier(CredVerifier):
                 if verification_result.verified:
                     claims = _extract_mdoc_claims(mdoc)
 
-                    # Check IETF Token Status List revocation if embedded in claims
-                    revocation_error = await check_status_list_claim(claims)
+                    # Check IETF Token Status List revocation: the MSO status,
+                    # or a legacy status element in the claims
+                    mso_status_json = mdoc.status_list()
+                    mso_status = json.loads(mso_status_json) if mso_status_json else None
+                    revocation_error = await check_status_list_claim(claims, mso_status)
                     if revocation_error:
                         LOGGER.warning(
                             "mDoc credential rejected — credential revoked: %s",

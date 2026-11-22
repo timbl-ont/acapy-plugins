@@ -32,6 +32,7 @@ marshmallow = "^3.20.1"
 jsonschema = "^4.23.0"
 jsonpath = "^0.82.2"
 cbor-diag = { version = "*", optional = true }
+cbor2 = { version = "~5", optional = true }
 cwt = { version = "~2", optional = true }
 cryptography = "<51.0.0"
 oscrypto = { git = "https://github.com/wbond/oscrypto.git", rev = "1547f53" }  # Resolves https://github.com/wbond/oscrypto/issues/78
@@ -46,7 +47,7 @@ filelock = ">=3.20.3,<5.0.0"
 
 [tool.poetry.extras]
 aca-py = ["acapy-agent"]
-mso_mdoc = ["cbor-diag", "cwt", "pycose"]
+mso_mdoc = ["cbor-diag", "cbor2", "cwt", "pycose"]
 sd_jwt_vc = ["jsonpointer"]
 
 [tool.poetry.group.dev.dependencies]
